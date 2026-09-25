@@ -1,11 +1,15 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 // Read from window.__ENV__ which is set by public/env-config.js (generated at build time)
+// Fallback to process.env for Next.js dev mode
 function getEnv(key: string): string | undefined {
   if (typeof window !== 'undefined' && window.__ENV__) {
     return window.__ENV__[key];
   }
-  // Fallback for build time (SSR) - will be replaced by env-config.js in browser
+  // Fallback for dev mode - Next.js provides process.env.NEXT_PUBLIC_* at runtime
+  if (typeof process !== 'undefined' && process.env) {
+    return process.env[key];
+  }
   return undefined;
 }
 
