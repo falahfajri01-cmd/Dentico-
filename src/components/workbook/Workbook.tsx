@@ -93,13 +93,17 @@ export default function Workbook() {
 
   /* ---------------- fetchers ---------------- */
   const fetchMeta = useCallback(async () => {
-    const params = qs();
-    const data = await getMeta({
-      brand: params.get("brand") ?? undefined,
-      city: params.get("city") ?? undefined,
-      branchCode: params.get("branch") ?? undefined,
-    });
-    setMeta(data);
+    try {
+      const params = qs();
+      const data = await getMeta({
+        brand: params.get("brand") ?? undefined,
+        city: params.get("city") ?? undefined,
+        branchCode: params.get("branch") ?? undefined,
+      });
+      setMeta(data);
+    } catch (err) {
+      console.error('Failed to fetch meta:', err);
+    }
   }, [qs]);
 
   const fetchSummaries = useCallback(
@@ -121,6 +125,8 @@ export default function Workbook() {
           const openRow = data.rows.find((r) => r.status === "OPEN") ?? data.rows[0];
           setSelectedId(openRow.id);
         }
+      } catch (err) {
+        console.error('Failed to fetch summaries:', err);
       } finally {
         setLoadingPage(false);
       }
@@ -133,6 +139,8 @@ export default function Workbook() {
     try {
       const data = await getDetail(id);
       if (data) setDetail(data);
+    } catch (err) {
+      console.error('Failed to fetch detail:', err);
     } finally {
       setLoadingDetail(false);
     }
@@ -149,14 +157,20 @@ export default function Workbook() {
         branchCode: params.get("branch") ?? undefined,
       });
       if (data) setSheetPayload(data);
+    } catch (err) {
+      console.error('Failed to fetch sheet:', err);
     } finally {
       setLoadingSheet(false);
     }
   }, [qs]);
 
   const refreshAfterSourceChange = useCallback(async () => {
-    await Promise.all([fetchMeta(), fetchSummaries(), selectedId != null ? fetchDetail(selectedId) : Promise.resolve()]);
-    if (dailyView !== "overview") await fetchSheet(dailyView);
+    try {
+      await Promise.all([fetchMeta(), fetchSummaries(), selectedId != null ? fetchDetail(selectedId) : Promise.resolve()]);
+      if (dailyView !== "overview") await fetchSheet(dailyView);
+    } catch (err) {
+      console.error('Failed to refresh:', err);
+    }
   }, [fetchMeta, fetchSummaries, fetchDetail, selectedId, dailyView, fetchSheet]);
 
   /* ---------------- effects ---------------- */
@@ -198,6 +212,8 @@ export default function Workbook() {
           await reopenSummary(selectedId);
         }
         await refreshAfterSourceChange();
+      } catch (err) {
+        console.error('Action failed:', err);
       } finally {
         setBusy(false);
       }
@@ -211,6 +227,8 @@ export default function Workbook() {
       try {
         await updateShiftReport(rowId, data);
         await refreshAfterSourceChange();
+      } catch (err) {
+        console.error('Shift report update failed:', err);
       } finally {
         setBusy(false);
       }

@@ -21,7 +21,12 @@ export function getSupabase(): SupabaseClient | null {
       return null;
     }
     
-    supabaseInstance = createClient(supabaseUrl, supabaseAnonKey);
+    try {
+      supabaseInstance = createClient(supabaseUrl, supabaseAnonKey);
+    } catch (err) {
+      console.error('Failed to create Supabase client:', err);
+      return null;
+    }
   }
   
   return supabaseInstance;
