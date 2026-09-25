@@ -2,7 +2,7 @@
   "name": "dentico-finance",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/generate-env-config.js && next dev",
     "build": "node scripts/generate-env-config.js && next build",
     "start": "next start",
     "lint": "eslint .",
