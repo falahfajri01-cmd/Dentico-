@@ -1,8 +1,13 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-// These are replaced at build time by Next.js for static export
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string;
+// Read from window.__ENV__ which is set by public/env-config.js (generated at build time)
+function getEnv(key: string): string | undefined {
+  if (typeof window !== 'undefined' && window.__ENV__) {
+    return window.__ENV__[key];
+  }
+  // Fallback for build time (SSR) - will be replaced by env-config.js in browser
+  return undefined;
+}
 
 let supabaseInstance: SupabaseClient | null = null;
 
@@ -16,6 +21,9 @@ export function getSupabase(): SupabaseClient | null {
   }
   
   if (!supabaseInstance) {
+    const supabaseUrl = getEnv('NEXT_PUBLIC_SUPABASE_URL');
+    const supabaseAnonKey = getEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY');
+    
     if (!supabaseUrl || !supabaseAnonKey) {
       console.warn('Supabase environment variables not set - running in demo mode');
       return null;
