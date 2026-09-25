@@ -27,6 +27,7 @@ import ShiftReportTable from "./ShiftReportTable";
 import Sidebar from "./Sidebar";
 import Topbar from "./Topbar";
 import TransferTable from "./TransferTable";
+import { listSummaries, getMeta, getDetail, buildSheet, resolveSummary, addNote, reopenSummary, updateShiftReport } from "@/lib/queries";
 
 const PAGE_SIZE = 8;
 const DAILY_VIEWS: DailySheetId[] = ["overview", "shift", "app", "branch", "qris", "edc", "transfer"];
@@ -93,8 +94,12 @@ export default function Workbook() {
   /* ---------------- fetchers ---------------- */
   const fetchMeta = useCallback(async () => {
     const params = qs();
-    const res = await fetch(`/api/meta?${params.toString()}`, { cache: "no-store" });
-    if (res.ok) setMeta(await res.json());
+    const data = await getMeta({
+      brand: params.get("brand") ?? undefined,
+      city: params.get("city") ?? undefined,
+      branchCode: params.get("branch") ?? undefined,
+    });
+    setMeta(data);
   }, [qs]);
 
   const fetchSummaries = useCallback(
@@ -102,13 +107,15 @@ export default function Workbook() {
       setLoadingPage(true);
       try {
         const params = qs();
-        params.set("page", String(pageNo));
-        params.set("pageSize", String(PAGE_SIZE));
-        if (status) params.set("status", status);
-        if (q) params.set("q", q);
-        const res = await fetch(`/api/summaries?${params.toString()}`, { cache: "no-store" });
-        if (!res.ok) return;
-        const data: SummaryPage = await res.json();
+        const data = await listSummaries({
+          status: status || undefined,
+          q: q || undefined,
+          brand: params.get("brand") ?? undefined,
+          city: params.get("city") ?? undefined,
+          branchCode: params.get("branch") ?? undefined,
+          page: pageNo,
+          pageSize: PAGE_SIZE,
+        });
         setPageData(data);
         if (selectMode === "firstOpen" && data.rows.length > 0) {
           const openRow = data.rows.find((r) => r.status === "OPEN") ?? data.rows[0];
@@ -124,8 +131,8 @@ export default function Workbook() {
   const fetchDetail = useCallback(async (id: number) => {
     setLoadingDetail(true);
     try {
-      const res = await fetch(`/api/summaries/${id}`, { cache: "no-store" });
-      if (res.ok) setDetail(await res.json());
+      const data = await getDetail(id);
+      if (data) setDetail(data);
     } finally {
       setLoadingDetail(false);
     }
@@ -136,8 +143,12 @@ export default function Workbook() {
     setLoadingSheet(true);
     try {
       const params = qs();
-      const res = await fetch(`/api/sheets/${sheet}?${params.toString()}`, { cache: "no-store" });
-      if (res.ok) setSheetPayload(await res.json());
+      const data = await buildSheet(sheet, {
+        brand: params.get("brand") ?? undefined,
+        city: params.get("city") ?? undefined,
+        branchCode: params.get("branch") ?? undefined,
+      });
+      if (data) setSheetPayload(data);
     } finally {
       setLoadingSheet(false);
     }
@@ -175,21 +186,36 @@ export default function Workbook() {
 
   /* ---------------- actions ---------------- */
   const runAction = useCallback(
-    async (action: "resolve" | "note", note?: string) => {
+    async (action: "resolve" | "note" | "reopen", note?: string) => {
       if (selectedId == null) return;
       setBusy(true);
       try {
-        await fetch(`/api/summaries/${selectedId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action, note }),
-        });
+        if (action === "resolve") {
+          await resolveSummary(selectedId);
+        } else if (action === "note" && note) {
+          await addNote(selectedId, note);
+        } else if (action === "reopen") {
+          await reopenSummary(selectedId);
+        }
         await refreshAfterSourceChange();
       } finally {
         setBusy(false);
       }
     },
     [selectedId, refreshAfterSourceChange],
+  );
+
+  const handleShiftReportChange = useCallback(
+    async (rowId: number, data: { qrisAmount?: number; transferAmount?: number; edcAmount?: number; cashAmount?: number; note?: string }) => {
+      setBusy(true);
+      try {
+        await updateShiftReport(rowId, data);
+        await refreshAfterSourceChange();
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshAfterSourceChange],
   );
 
   const jumpToSummary = useCallback((summaryId: number) => {
@@ -325,19 +351,73 @@ export default function Workbook() {
               {dailyView === "overview" ? (
                 <OverviewTable page={pageData} loading={loadingPage} selectedId={selectedId} onSelect={(id) => setSelectedId(id)} onPage={(p) => setPageNo(p)} />
               ) : dailyView === "shift" ? (
-                <ShiftReportTable payload={sheetPayload} loading={loadingSheet} onJump={jumpToSummary} activeBrand={brand} activeCity={city} activeBranchCode={branchCode} onSourceChanged={refreshAfterSourceChange} />
+                <ShiftReportTable
+                  payload={sheetPayload}
+                  loading={loadingSheet}
+                  onJump={jumpToSummary}
+                  activeBrand={brand}
+                  activeCity={city}
+                  activeBranchCode={branchCode}
+                  onSourceChanged={refreshAfterSourceChange}
+                  onRowChange={handleShiftReportChange}
+                />
               ) : dailyView === "app" ? (
-                <AppTransactionTable payload={sheetPayload} loading={loadingSheet} onJump={jumpToSummary} activeBrand={brand} activeCity={city} activeBranchCode={branchCode} onSourceChanged={refreshAfterSourceChange} />
+                <AppTransactionTable
+                  payload={sheetPayload}
+                  loading={loadingSheet}
+                  onJump={jumpToSummary}
+                  activeBrand={brand}
+                  activeCity={city}
+                  activeBranchCode={branchCode}
+                  onSourceChanged={refreshAfterSourceChange}
+                />
               ) : dailyView === "branch" ? (
-                <BranchSpreadsheetTable payload={sheetPayload} loading={loadingSheet} onJump={jumpToSummary} activeBrand={brand} activeCity={city} activeBranchCode={branchCode} onSourceChanged={refreshAfterSourceChange} />
+                <BranchSpreadsheetTable
+                  payload={sheetPayload}
+                  loading={loadingSheet}
+                  onJump={jumpToSummary}
+                  activeBrand={brand}
+                  activeCity={city}
+                  activeBranchCode={branchCode}
+                  onSourceChanged={refreshAfterSourceChange}
+                />
               ) : dailyView === "qris" ? (
-                <QrisTable payload={sheetPayload} loading={loadingSheet} onJump={jumpToSummary} activeBrand={brand} activeCity={city} activeBranchCode={branchCode} onSourceChanged={refreshAfterSourceChange} />
+                <QrisTable
+                  payload={sheetPayload}
+                  loading={loadingSheet}
+                  onJump={jumpToSummary}
+                  activeBrand={brand}
+                  activeCity={city}
+                  activeBranchCode={branchCode}
+                  onSourceChanged={refreshAfterSourceChange}
+                />
               ) : dailyView === "edc" ? (
-                <EdcTable payload={sheetPayload} loading={loadingSheet} onJump={jumpToSummary} activeBrand={brand} activeCity={city} activeBranchCode={branchCode} onSourceChanged={refreshAfterSourceChange} />
+                <EdcTable
+                  payload={sheetPayload}
+                  loading={loadingSheet}
+                  onJump={jumpToSummary}
+                  activeBrand={brand}
+                  activeCity={city}
+                  activeBranchCode={branchCode}
+                  onSourceChanged={refreshAfterSourceChange}
+                />
               ) : dailyView === "transfer" ? (
-                <TransferTable payload={sheetPayload} loading={loadingSheet} onJump={jumpToSummary} activeBrand={brand} activeCity={city} activeBranchCode={branchCode} onSourceChanged={refreshAfterSourceChange} />
+                <TransferTable
+                  payload={sheetPayload}
+                  loading={loadingSheet}
+                  onJump={jumpToSummary}
+                  activeBrand={brand}
+                  activeCity={city}
+                  activeBranchCode={branchCode}
+                  onSourceChanged={refreshAfterSourceChange}
+                />
               ) : (
-                <GenericSheetTable payload={sheetPayload} loading={loadingSheet} title={TABS.find((t) => t.id === dailyView)?.label ?? ""} onJump={jumpToSummary} />
+                <GenericSheetTable
+                  payload={sheetPayload}
+                  loading={loadingSheet}
+                  title={TABS.find((t) => t.id === dailyView)?.label ?? ""}
+                  onJump={jumpToSummary}
+                />
               )}
 
               {dailyView === "overview" && (

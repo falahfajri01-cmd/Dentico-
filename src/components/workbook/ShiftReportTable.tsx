@@ -28,6 +28,7 @@ interface Props {
   activeCity: string;
   activeBranchCode: string;
   onSourceChanged?: () => void | Promise<void>;
+  onRowChange?: (rowId: number, data: { qrisAmount?: number; transferAmount?: number; edcAmount?: number; cashAmount?: number; note?: string }) => Promise<void>;
 }
 
 interface ShiftRow {
@@ -136,6 +137,7 @@ export default function ShiftReportTable({
   activeCity,
   activeBranchCode,
   onSourceChanged,
+  onRowChange,
 }: Props) {
   const [rows, setRows] = useState<ShiftRow[]>([]);
   const [saveState, setSaveState] = useState<Record<number, SaveState>>({});
@@ -183,18 +185,11 @@ export default function ShiftReportTable({
   async function patchRow(id: number, row: ShiftRow) {
     setSaveState((p) => ({ ...p, [id]: "saving" }));
     try {
-      await fetch(`/api/source-grid/shift/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          qris: row.qris,
-          transfer: row.transfer,
-          edc: row.edc,
-          cash: row.cash,
-          pendapatan: row.pendapatan,
-          ekspektasi: row.ekspektasi,
-          shift: row.shift,
-        }),
+      await onRowChange?.(id, {
+        qrisAmount: row.qris,
+        transferAmount: row.transfer,
+        edcAmount: row.edc,
+        cashAmount: row.cash,
       });
       setSaveState((p) => ({ ...p, [id]: "saved" }));
       setTimeout(() => setSaveState((p) => ({ ...p, [id]: "idle" })), 1400);
@@ -218,26 +213,25 @@ export default function ShiftReportTable({
 
   /* Add single empty row */
   async function addRow() {
-    await fetch(`/api/source-grid/shift`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        brand: activeBrand,
-        city: activeCity,
-        rows: [
-          {
-            tanggal: "21 Sep 2026",
-            cabang: activeBranchCode,
-            shift: "Pagi",
-            pendapatan: 0,
-            qris: 0,
-            transfer: 0,
-            edc: 0,
-            cash: 0,
-          },
-        ],
-      }),
-    });
+    const newRow: ShiftRow = {
+      id: Date.now(),
+      summaryId: 0,
+      tanggal: "21 Sep 2026",
+      branchCode: activeBranchCode,
+      branchName: "",
+      shift: 1,
+      kasir: "",
+      spv: "",
+      pendapatan: 0,
+      qris: 0,
+      transfer: 0,
+      edc: 0,
+      cash: 0,
+      ekspektasi: 0,
+      selisih: 0,
+      status: "MATCH",
+    };
+    setRows((prev) => [...prev, newRow]);
     await onSourceChanged?.();
   }
 
@@ -251,22 +245,26 @@ export default function ShiftReportTable({
     if (grid.length <= 1 && grid[0]?.length <= 1) return;
     e.preventDefault();
     const prepared = grid.map((cols) => ({
+      id: Date.now() + Math.random(),
+      summaryId: 0,
       tanggal: cols[0] || "21 Sep 2026",
-      cabang: cols[1] || activeBranchCode,
-      shift: cols[2] || "Pagi",
+      branchCode: cols[1] || activeBranchCode,
+      branchName: "",
+      shift: Number(cols[2] || "1"),
+      kasir: "",
+      spv: "",
       pendapatan: Number((cols[3] || "0").replace(/\D/g, "")),
       qris: Number((cols[4] || "0").replace(/\D/g, "")),
       transfer: Number((cols[5] || "0").replace(/\D/g, "")),
       edc: Number((cols[6] || "0").replace(/\D/g, "")),
       cash: Number((cols[7] || "0").replace(/\D/g, "")),
+      ekspektasi: 0,
+      selisih: 0,
+      status: "MATCH",
     }));
-    setBulkInfo(`${prepared.length} baris terdeteksi — menyimpan...`);
-    await fetch(`/api/source-grid/shift`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ brand: activeBrand, city: activeCity, rows: prepared }),
-    });
-    setBulkInfo(`${prepared.length} baris tersimpan`);
+    setBulkInfo(`${prepared.length} baris terdeteksi — menambahkan...`);
+    setRows((prev) => [...prev, ...prepared]);
+    setBulkInfo(`${prepared.length} baris ditambahkan`);
     setTimeout(() => setBulkInfo(""), 1800);
     await onSourceChanged?.();
   }

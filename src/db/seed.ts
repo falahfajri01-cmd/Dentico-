@@ -1,14 +1,14 @@
 import "dotenv/config";
-import { db } from "./index";
-import {
-  auditLogs,
-  branches,
-  dailySummaries,
-  exceptions,
-  paymentChecks,
-  shiftReports,
-  transactions,
-} from "./schema";
+import { createClient } from '@supabase/supabase-js';
+
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error('Missing Supabase environment variables');
+}
+
+const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 /* ------------------------------------------------------------------ */
 /* Dummy data Dentico Finance — periode 16–21 Sep 2026                 */
@@ -348,14 +348,30 @@ function splitThree(total: number): number[] {
 }
 
 export async function ensureSeeded() {
-  const existing = await db.select({ id: branches.id }).from(branches).limit(1);
-  if (existing.length > 0) return false;
+  const { data: existing, error: existingError } = await supabase.from('branches').select('id').limit(1);
+  if (existingError) throw existingError;
+  if (existing && existing.length > 0) {
+    console.log('Skipped: data already seeded.');
+    return false;
+  }
 
-  const branchRows = await db.insert(branches).values(BRANCHES).returning();
-  const byCode = new Map(branchRows.map((b) => [b.code, b.id]));
+  const { data: branchRows, error: branchError } = await supabase.from('branches').insert(BRANCHES).select();
+  if (branchError) throw branchError;
+
+  const byCode = new Map((branchRows ?? []).map((b) => [b.code, b.id]));
   const dmy = (iso: string) => new Date(`${iso}T09:00:00+07:00`);
   let prevHash = fakeHash("genesis-dentico");
-  const logs: Array<typeof auditLogs.$inferInsert> = [];
+  const logs: Array<{
+    summary_id: number | null;
+    action: string;
+    actor: string;
+    role: string;
+    detail: string;
+    hash: string;
+    prev_hash: string;
+    verified: boolean;
+    created_at: string;
+  }> = [];
   const pushLog = (
     summaryId: number | null,
     action: string,
@@ -366,7 +382,7 @@ export async function ensureSeeded() {
     verified = true,
   ) => {
     const hash = fakeHash(`${prevHash}${action}${actor}${at.toISOString()}`);
-    logs.push({ summaryId, action, actor, role, detail, hash, prevHash, verified, createdAt: at });
+    logs.push({ summary_id: summaryId, action, actor, role, detail, hash, prev_hash: prevHash, verified, created_at: at.toISOString() });
     prevHash = hash;
   };
 
@@ -388,23 +404,27 @@ export async function ensureSeeded() {
     const shiftPhys = cfg.shiftPhysical ?? [...shiftExp];
     const shiftRevenue = shiftPhys.reduce((a, b) => a + b, 0);
 
-    const [summary] = await db
-      .insert(dailySummaries)
-      .values({
-        branchId,
+    const { data: summaryData, error: summaryError } = await supabase
+      .from('daily_summaries')
+      .insert({
+        branch_id: branchId,
         date: cfg.date,
-        shiftDone: cfg.shiftDone,
-        shiftTotal: 3,
-        appRevenue,
-        branchRevenue,
-        shiftRevenue,
-        diffAppBranch: appRevenue - branchRevenue,
-        diffBranchShift: branchRevenue - shiftRevenue,
+        shift_done: cfg.shiftDone,
+        shift_total: 3,
+        app_revenue: appRevenue,
+        branch_revenue: branchRevenue,
+        shift_revenue: shiftRevenue,
+        diff_app_branch: appRevenue - branchRevenue,
+        diff_branch_shift: branchRevenue - shiftRevenue,
         status: cfg.status,
-        sortKey: sortIdx + 1,
-        createdAt: dmy(cfg.date),
+        sort_key: sortIdx + 1,
+        created_at: dmy(cfg.date).toISOString(),
       })
-      .returning();
+      .select()
+      .single();
+
+    if (summaryError) throw summaryError;
+    const summary = summaryData;
 
     const dshort = cfg.date.slice(8, 10) + cfg.date.slice(5, 7);
     const base = dmy(cfg.date);
@@ -412,31 +432,31 @@ export async function ensureSeeded() {
     // --- Transactions (APP + BRANCH sheet) ---
     for (const [i, t] of cfg.txns.entries()) {
       const refIdx = String(i + 1).padStart(2, "0");
-      await db.insert(transactions).values([
+      await supabase.from('transactions').insert([
         {
-          summaryId: summary.id,
+          summary_id: summary.id,
           source: "APP",
           reference: `TX-${cfg.branch}-${dshort}-${refIdx}`,
-          patientName: t.patient,
+          patient_name: t.patient,
           treatment: t.treatment,
           channel: t.channel,
           amount: t.amount,
-          inputBy: "EMR Core App",
+          input_by: "EMR Core App",
           status: t.branchAmount != null ? "OK" : "OK",
           note: "Closed Invoiced",
           flagged: t.branchAmount != null,
-          createdAt: new Date(base.getTime() + i * 3_600_000),
+          created_at: new Date(base.getTime() + i * 3_600_000).toISOString(),
         },
         {
-          summaryId: summary.id,
+          summary_id: summary.id,
           source: "BRANCH",
           // WB 21 Sep dikunci ke Row #40-42 agar cocok dengan narasi exception (Row #42)
           reference: `Row #${cfg.branch === "WB" && cfg.date === "2026-09-21" ? 40 + i : 38 + sortIdx * 7 + i}`,
-          patientName: t.patient,
+          patient_name: t.patient,
           treatment: t.branchAmount != null ? "Input Manual Kasir" : t.treatment,
           channel: t.channel,
           amount: t.branchAmount ?? t.amount,
-          inputBy: cfg.cashiers?.[2] ?? CASHIERS[(sortIdx + 2) % CASHIERS.length],
+          input_by: cfg.cashiers?.[2] ?? CASHIERS[(sortIdx + 2) % CASHIERS.length],
           status: t.branchAmount != null ? "MISMATCH" : "OK",
           note:
             t.branchAmount != null
@@ -445,7 +465,7 @@ export async function ensureSeeded() {
                 }Rp${Math.abs(t.branchAmount - t.amount).toLocaleString("id-ID")})`
               : "Terverifikasi otomatis",
           flagged: t.branchAmount != null,
-          createdAt: new Date(base.getTime() + i * 3_600_000 + 600_000),
+          created_at: new Date(base.getTime() + i * 3_600_000 + 600_000).toISOString(),
         },
       ]);
     }
@@ -464,21 +484,21 @@ export async function ensureSeeded() {
       const transfer = Math.round(phys * 0.20);
       const edc = Math.round(phys * 0.25);
       const cash = phys - qris - transfer - edc;
-      await db.insert(shiftReports).values({
-        summaryId: summary.id,
-        shiftIndex: k + 1,
+      await supabase.from('shift_reports').insert({
+        summary_id: summary.id,
+        shift_index: k + 1,
         cashier: cashiers[k],
         supervisor: sup,
-        expectedAmount: exp,
-        physicalAmount: phys,
+        expected_amount: exp,
+        physical_amount: phys,
         variance,
         status: isPending ? "PENDING" : variance === 0 ? "MATCH" : variance > 0 ? "OVER" : "UNDER",
         note: cfg.shiftNotes?.[k] ?? "",
-        handoverAt: `${7 + k * 6}45`.padStart(4, "0"),
-        qrisAmount: qris,
-        transferAmount: transfer,
-        edcAmount: edc,
-        cashAmount: cash,
+        handover_at: `${7 + k * 6}45`.padStart(4, "0"),
+        qris_amount: qris,
+        transfer_amount: transfer,
+        edc_amount: edc,
+        cash_amount: cash,
       });
     }
 
@@ -488,10 +508,10 @@ export async function ensureSeeded() {
       const expected = cfg.txns.filter((t) => t.channel === ch).reduce((a, t) => a + t.amount, 0);
       if (st === "NONE" && expected === 0) continue;
       const varianceAdj = ch === "TRANSFER" || ch === "QRIS" || ch === "EDC" ? 0 : 0;
-      await db.insert(paymentChecks).values({
-        summaryId: summary.id,
+      await supabase.from('payment_checks').insert({
+        summary_id: summary.id,
         channel: ch,
-        accountLabel: ACCOUNT_LABEL[ch],
+        account_label: ACCOUNT_LABEL[ch],
         expected,
         actual: st === "MATCH" ? expected : st === "EXCEPTION" ? 0 : null,
         status: st,
@@ -503,14 +523,14 @@ export async function ensureSeeded() {
 
     // --- Exception ---
     if (cfg.exception) {
-      await db.insert(exceptions).values({
-        summaryId: summary.id,
+      await supabase.from('exceptions').insert({
+        summary_id: summary.id,
         severity: cfg.exception.severity,
         title: cfg.exception.title,
         description: cfg.exception.description,
         owner: cfg.exception.owner,
         status: cfg.exception.status,
-        createdAt: new Date(base.getTime() + 40_000_000),
+        created_at: new Date(base.getTime() + 40_000_000).toISOString(),
       });
     }
 
@@ -590,8 +610,10 @@ export async function ensureSeeded() {
   }
 
   if (logs.length > 0) {
-    await db.insert(auditLogs).values(logs);
+    const { error: logsError } = await supabase.from('audit_logs').insert(logs);
+    if (logsError) throw logsError;
   }
+  console.log('Seed complete: dummy workbook inserted.');
   return true;
 }
 

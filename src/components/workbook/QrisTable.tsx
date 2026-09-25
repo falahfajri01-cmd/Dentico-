@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Filter, Plus, QrCode } from "lucide-react";
 import type { SheetPayload } from "@/lib/types";
 import { Skeleton } from "./ui";
+import { updatePaymentCheck, createPaymentCheck } from "@/lib/queries";
 
 interface Props {
   payload: SheetPayload | null;
@@ -15,7 +16,7 @@ interface Props {
   onSourceChanged?: () => void | Promise<void>;
 }
 
-type Row = Record<string, string | number | null> & { id?: number };
+type Row = Record<string, string | number | null> & { id?: number; summaryId?: number };
 
 export default function QrisTable({ payload, loading, activeBrand, activeCity, activeBranchCode, onSourceChanged }: Props) {
   const [rows, setRows] = useState<Row[]>([]);
@@ -30,10 +31,11 @@ export default function QrisTable({ payload, loading, activeBrand, activeCity, a
   async function patch(index: number) {
     const row = rows[index];
     if (!row?.id) return;
-    await fetch(`/api/source-grid/qris/${row.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ brand: activeBrand, city: activeCity, tanggal: row.tanggal, cabang: row.cabang, ekspektasi: Number(row.ekspektasi ?? 0), ref: row.ref, status: row.status }),
+    await updatePaymentCheck(Number(row.id), {
+      expected: Number(row.ekspektasi ?? 0),
+      actual: row.actual === "" ? null : Number(row.actual ?? 0),
+      reference: String(row.ref ?? ""),
+      status: String(row.status ?? "MATCH"),
     });
     await onSourceChanged?.();
   }
@@ -46,10 +48,17 @@ export default function QrisTable({ payload, loading, activeBrand, activeCity, a
   }
 
   async function addRow() {
-    await fetch(`/api/source-grid/qris`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ brand: activeBrand, city: activeCity, rows: [{ tanggal: "21 Sep 2026", cabang: activeBranchCode, nominal: 0, ref: "", status: "MATCH" }] }),
+    const branchRows = payload?.rows.filter(r => r.branchCode === activeBranchCode) ?? [];
+    const summaryId = Number(branchRows[0]?.summaryId ?? 0);
+    await createPaymentCheck({
+      summary_id: summaryId,
+      channel: 'QRIS',
+      account_label: 'QRIS BCA',
+      expected: 0,
+      actual: null,
+      status: 'MATCH',
+      reference: '',
+      note: 'Auto-saved spreadsheet row',
     });
     await onSourceChanged?.();
   }
@@ -59,9 +68,20 @@ export default function QrisTable({ payload, loading, activeBrand, activeCity, a
     const grid = text.trim().split(/\r?\n/).map((l) => l.split("\t").map((v) => v.trim())).filter((r) => r.some(Boolean));
     if (grid.length <= 1 && grid[0]?.length <= 1) return;
     e.preventDefault();
-    const prepared = grid.map((cols) => ({ tanggal: cols[0] || "21 Sep 2026", cabang: cols[1] || activeBranchCode, nominal: Number((cols[2] || "0").replace(/\D/g, "")), ref: cols[3] || "", status: cols[4] || "MATCH" }));
+    const branchRows = payload?.rows.filter(r => r.branchCode === activeBranchCode) ?? [];
+    const summaryId = Number(branchRows[0]?.summaryId ?? 0);
+    const prepared = grid.map((cols) => ({
+      summary_id: summaryId,
+      channel: 'QRIS' as const,
+      account_label: 'QRIS BCA',
+      expected: Number((cols[2] || "0").replace(/\D/g, "")),
+      actual: Number((cols[2] || "0").replace(/\D/g, "")),
+      reference: cols[3] || "",
+      status: cols[4] || "MATCH",
+      note: 'Auto-saved spreadsheet row',
+    }));
     setBulkInfo(`${prepared.length} rows detected — auto-saving...`);
-    await fetch(`/api/source-grid/qris`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ brand: activeBrand, city: activeCity, rows: prepared }) });
+    await Promise.all(prepared.map(p => createPaymentCheck(p)));
     setBulkInfo(`${prepared.length} rows saved`);
     setTimeout(() => setBulkInfo(""), 1800);
     await onSourceChanged?.();
@@ -79,8 +99,6 @@ export default function QrisTable({ payload, loading, activeBrand, activeCity, a
       </div>
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
         <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3"><div className="flex items-center gap-2"><QrCode className="text-[#E53935]" size={16} /><h3 className="font-bold text-gray-900">QRIS Digital Spreadsheet</h3></div><span className="text-[10px] font-bold text-gray-400 uppercase">Auto-saved</span></div>
-        <div className="w-full overflow-x-auto"><table className="w-full border-collapse text-left text-[12px] whitespace-nowrap"><thead><tr className="border-b border-gray-200 bg-gray-50/30 text-xs font-semibold text-gray-500"><th className="px-5 py-3.5">Tanggal</th><th className="px-4 py-3.5">Cabang</th><th className="px-4 py-3.5 text-right">Nominal</th><th className="px-4 py-3.5">RRN / Ref</th><th className="px-4 py-3.5 text-center">Status</th></tr></thead><tbody className="divide-y divide-gray-100">{loading && Array.from({length:5}).map((_,i)=><tr key={i}><td colSpan={5} className="p-3"><Skeleton className="h-8 w-full" /></td></tr>)}{!loading && rows.map((r,i)=><tr key={Number(r.id)||i} className="hover:bg-gray-50"><td className="px-5 py-2"><input value={String(r.tanggal ?? "")} onChange={(e)=>updateCell(i,"tanggal",e.target.value)} className="w-full rounded p-1 outline-none hover:bg-blue-50 focus:bg-white focus:ring-1 focus:ring-blue-300" /></td><td className="px-4 py-2"><input value={String(r.cabang ?? activeBranchCode)} onChange={(e)=>updateCell(i,"cabang",e.target.value)} className="w-full rounded p-1 font-semibold text-gray-700 outline-none hover:bg-blue-50 focus:bg-white focus:ring-1 focus:ring-blue-300" /></td><td className="px-4 py-2 text-right"><input value={String(Number(r.ekspektasi ?? 0).toLocaleString("id-ID"))} onChange={(e)=>updateCell(i,"ekspektasi",e.target.value.replace(/\D/g,""))} onBlur={()=>schedule(i)} onPaste={handlePaste} className="w-28 rounded p-1 text-right font-num font-bold outline-none hover:bg-blue-50 focus:bg-white focus:ring-1 focus:ring-blue-300" /></td><td className="px-4 py-2"><input value={String(r.ref ?? "")} onChange={(e)=>updateCell(i,"ref",e.target.value)} onBlur={()=>schedule(i)} className="w-full rounded p-1 font-mono text-[11px] outline-none hover:bg-blue-50 focus:bg-white focus:ring-1 focus:ring-blue-300" /></td><td className="px-4 py-2 text-center"><select value={String(r.status ?? "MATCH")} onChange={(e)=>{updateCell(i,"status",e.target.value); schedule(i);}} className="rounded px-2 py-1 text-[10px] font-bold outline-none hover:bg-blue-50 focus:bg-white focus:ring-1 focus:ring-blue-300"><option>MATCH</option><option>PENDING</option><option>EXCEPTION</option></select></td></tr>)}</tbody></table></div>
-      </div>
-    </section>
+        <div className="w-full overflow-x-auto"><table className="w-full border-collapse text-left text-[12px] whitespace-nowrap"><thead><tr className="border-b border-gray-200 bg-gray-50/30 text-xs font-semibold text-gray-500"><th className="px-5 py-3.5">Tanggal</th><th className="px-4 py-3.5">Cabang</th><th className="px-4 py-3.5 text-right">Nominal</th><th className="px-4 py-3.5">RRN / Ref</th><th className="px-4 py-3.5 text-center">Status</th></tr></thead><tbody className="divide-y divide-gray-100">{loading && Array.from({length:5}).map((_,i)=><tr key={i}><td colSpan={5} className="p-3"><Skeleton className="h-8 w-full" /></td></tr>)}{!loading && rows.map((r,i)=><tr key={Number(r.id)||i} className="hover:bg-gray-50"><td className="px-5 py-2"><input value={String(r.tanggal ?? "")} onChange={(e)=>updateCell(i,"tanggal",e.target.value)} className="w-full rounded p-1 outline-none hover:bg-blue-50 focus:bg-white focus:ring-1 focus:ring-blue-300" /></td><td className="px-4 py-2"><input value={String(r.cabang ?? activeBranchCode)} onChange={(e)=>updateCell(i,"cabang",e.target.value)} className="w-full rounded p-1 font-semibold text-gray-700 outline-none hover:bg-blue-50 focus:bg-white focus:ring-1 focus:ring-blue-300" /></td><td className="px-4 py-2 text-right"><input value={String(Number(r.ekspektasi ?? 0).toLocaleString("id-ID"))} onChange={(e)=>updateCell(i,"ekspektasi",e.target.value.replace(/\D/g,""))} onBlur={()=>schedule(i)} onPaste={handlePaste} className="w-28 rounded p-1 text-right font-num font-bold outline-none hover:bg-blue-50 focus:bg-white focus:ring-1 focus:ring-blue-300" /></td><td className="px-4 py-2"><input value={String(r.ref ?? "")} onChange={(e)=>updateCell(i,"ref",e.target.value)} onBlur={()=>schedule(i)} className="w-full rounded p-1 font-mono text-[11px] outline-none hover:bg-blue-50 focus:bg-white focus:ring-1 focus:ring-blue-300" /></td><td className="px-4 py-2 text-center"><select value={String(r.status ?? "MATCH")} onChange={(e)=>updateCell(i,"status",e.target.value)} onBlur={()=>schedule(i)} className="rounded p-1 outline-none hover:bg-blue-50 focus:bg-white focus:ring-1 focus:ring-blue-300"><option>MATCH</option><option>PENDING</option><option>EXCEPTION</option><option>NONE</option></select></td></tr>)}</tbody></table></div></div></section>
   );
 }

@@ -1,19 +1,15 @@
-import { supabase } from '@/lib/supabase';
-import type { MatchState, SummaryRow } from '@/lib/types';
+import { getSupabase } from '@/lib/supabase';
 import { dateShort } from '@/lib/format';
-
-let seedPromise: Promise<unknown> | null = null;
-export function seeded() {
-  if (!seedPromise) {
-    seedPromise = ensureSeeded().catch((e) => {
-      seedPromise = null;
-      throw e;
-    });
-  }
-  return seedPromise;
-}
+import type { MatchState, SummaryRow, SheetPayload } from '@/lib/types';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const COLS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+
+function getClient(): SupabaseClient {
+  const client = getSupabase();
+  if (!client) throw new Error('Supabase client not available (must run in browser)');
+  return client;
+}
 
 function statusFromSources(params: {
   diffAppBranch: number;
@@ -36,17 +32,13 @@ function channelState(checks: Array<{ channel: string; status: string }>, channe
   return (item?.status as MatchState | undefined) ?? 'NONE';
 }
 
-async function getBranchUniverse(filters: {
-  brand?: string;
-  city?: string;
-  branchCode?: string;
-  q?: string;
-}) {
-  let query = supabase.from('branches').select('*').order('code', { ascending: true });
+async function getBranchUniverse(filters: { brand?: string; city?: string; branchCode?: string; q?: string }) {
+  let query = getClient().from('branches').select('*').order('code', { ascending: true });
   const { data: allBranches, error } = await query;
   if (error) throw error;
 
-  const filteredBranches = (allBranches ?? []).filter((b) => {
+  const branches = (allBranches ?? []) as Array<{ id: number; code: string; name: string; city: string; brand: string }>;
+  const filteredBranches = branches.filter((b) => {
     const matchBrand = !filters.brand || b.brand === filters.brand;
     const matchCity = !filters.city || b.city === filters.city;
     const matchBranch = !filters.branchCode || b.code === filters.branchCode;
@@ -54,22 +46,22 @@ async function getBranchUniverse(filters: {
       !filters.q || `${b.code} ${b.name} ${b.city} ${b.brand}`.toLowerCase().includes(filters.q.toLowerCase());
     return matchBrand && matchCity && matchBranch && matchQ;
   });
-  return { allBranches: allBranches ?? [], filteredBranches };
+  return { allBranches: branches, filteredBranches };
 }
 
 async function getAggregatedSourceMaps(summaryIds: number[]) {
   if (summaryIds.length === 0) {
     return {
       txns: [] as Array<{ summary_id: number; source: string; amount: number }>,
-      shifts: [] as Array<{ summary_id: number; physical_amount: number }>,
+      shifts: [] as Array<{ summary_id: number; physical_amount: number; shift_index: number }>,
       checks: [] as Array<{ summary_id: number; channel: string; status: string }>,
     };
   }
 
   const [txnsRes, shiftsRes, checksRes] = await Promise.all([
-    supabase.from('transactions').select('summary_id, source, amount').in('summary_id', summaryIds),
-    supabase.from('shift_reports').select('summary_id, physical_amount').in('summary_id', summaryIds),
-    supabase.from('payment_checks').select('summary_id, channel, status').in('summary_id', summaryIds),
+    getClient().from('transactions').select('summary_id, source, amount').in('summary_id', summaryIds),
+    getClient().from('shift_reports').select('summary_id, physical_amount, shift_index').in('summary_id', summaryIds),
+    getClient().from('payment_checks').select('summary_id, channel, status').in('summary_id', summaryIds),
   ]);
 
   if (txnsRes.error) throw txnsRes.error;
@@ -87,7 +79,7 @@ function aggregateForSummary(
   summary: { id: number; branch_id: number; date: string; shift_done: number; app_revenue: number; branch_revenue: number; shift_revenue: number; diff_app_branch: number; diff_branch_shift: number; status: string; sort_key: number },
   branch: { id: number; code: string; name: string; city: string; brand: string },
   txns: Array<{ summary_id: number; source: string; amount: number }>,
-  shifts: Array<{ summary_id: number; physical_amount: number }>,
+  shifts: Array<{ summary_id: number; physical_amount: number; shift_index: number }>,
   checks: Array<{ summary_id: number; channel: string; status: string }>,
   rowIndex: number,
 ): SummaryRow {
@@ -139,7 +131,6 @@ export async function listSummaries(opts: {
   page: number;
   pageSize: number;
 }) {
-  await seeded();
   const { allBranches, filteredBranches } = await getBranchUniverse(opts);
   if (filteredBranches.length === 0) {
     return {
@@ -152,7 +143,7 @@ export async function listSummaries(opts: {
   }
 
   const branchIds = filteredBranches.map((b) => b.id);
-  const { data: summaryRows, error } = await supabase
+  const { data: summaryRows, error } = await getClient()
     .from('daily_summaries')
     .select('*')
     .in('branch_id', branchIds)
@@ -161,8 +152,9 @@ export async function listSummaries(opts: {
 
   if (error) throw error;
 
-  const maps = await getAggregatedSourceMaps((summaryRows ?? []).map((r) => r.id));
-  let computed = (summaryRows ?? []).map((r, i) =>
+  const summaries = (summaryRows ?? []) as Array<{ id: number; branch_id: number; date: string; shift_done: number; app_revenue: number; branch_revenue: number; shift_revenue: number; diff_app_branch: number; diff_branch_shift: number; status: string; sort_key: number }>;
+  const maps = await getAggregatedSourceMaps(summaries.map((r) => r.id));
+  let computed = summaries.map((r, i) =>
     aggregateForSummary(r, filteredBranches.find((b) => b.id === r.branch_id)!, maps.txns, maps.shifts, maps.checks, i + 1)
   );
 
@@ -194,34 +186,29 @@ export async function listSummaries(opts: {
   };
 }
 
-export async function getSummaryCounts(filters: {
-  brand?: string;
-  city?: string;
-  branchCode?: string;
-}) {
+export async function getSummaryCounts(filters: { brand?: string; city?: string; branchCode?: string }) {
   const page = await listSummaries({ ...filters, page: 1, pageSize: 1000 });
   return page.counts;
 }
 
 export async function getDetail(id: number) {
-  await seeded();
   const [summaryRes, branchesRes] = await Promise.all([
-    supabase.from('daily_summaries').select('*').eq('id', id).single(),
-    supabase.from('branches').select('*'),
+    getClient().from('daily_summaries').select('*').eq('id', id).single(),
+    getClient().from('branches').select('*'),
   ]);
   if (summaryRes.error || !summaryRes.data) return null;
   if (branchesRes.error) throw branchesRes.error;
 
-  const summary = summaryRes.data;
-  const branch = branchesRes.data?.find((b) => b.id === summary.branch_id);
+  const summary = summaryRes.data as { id: number; branch_id: number; date: string; shift_done: number; app_revenue: number; branch_revenue: number; shift_revenue: number; diff_app_branch: number; diff_branch_shift: number; status: string; sort_key: number };
+  const branch = (branchesRes.data ?? []).find((b) => b.id === summary.branch_id) as { id: number; code: string; name: string; city: string; brand: string } | undefined;
   if (!branch) return null;
 
   const [txnsRes, shiftsRes, paysRes, excsRes, logsRes] = await Promise.all([
-    supabase.from('transactions').select('*').eq('summary_id', id),
-    supabase.from('shift_reports').select('*').eq('summary_id', id),
-    supabase.from('payment_checks').select('*').eq('summary_id', id),
-    supabase.from('exceptions').select('*').eq('summary_id', id),
-    supabase.from('audit_logs').select('*').eq('summary_id', id).order('created_at', { ascending: false }).limit(8),
+    getClient().from('transactions').select('*').eq('summary_id', id),
+    getClient().from('shift_reports').select('*').eq('summary_id', id),
+    getClient().from('payment_checks').select('*').eq('summary_id', id),
+    getClient().from('exceptions').select('*').eq('summary_id', id),
+    getClient().from('audit_logs').select('*').eq('summary_id', id).order('created_at', { ascending: false }).limit(8),
   ]);
 
   if (txnsRes.error) throw txnsRes.error;
@@ -242,12 +229,7 @@ export async function getDetail(id: number) {
   };
 }
 
-export async function getMeta(filters?: {
-  brand?: string;
-  city?: string;
-  branchCode?: string;
-}) {
-  await seeded();
+export async function getMeta(filters?: { brand?: string; city?: string; branchCode?: string }) {
   const { allBranches, filteredBranches } = await getBranchUniverse(filters ?? {});
   const overview = await listSummaries({ ...(filters ?? {}), page: 1, pageSize: 1000 });
   const allSummaries = overview.rows;
@@ -265,7 +247,7 @@ export async function getMeta(filters?: {
   const summaryIds = overview.rows.map((r) => r.id);
   let exceptionRows: Array<{ e: any; s: any; b: any }> = [];
   if (summaryIds.length > 0) {
-    const { data, error } = await supabase
+    const { data, error } = await getClient()
       .from('exceptions')
       .select('*, daily_summaries!inner(*, branches!inner(*))')
       .in('summary_id', summaryIds)
@@ -278,7 +260,7 @@ export async function getMeta(filters?: {
     }));
   }
 
-  const { data: recentLogs, error: logsError } = await supabase
+  const { data: recentLogs, error: logsError } = await getClient()
     .from('audit_logs')
     .select('*')
     .order('created_at', { ascending: false })
@@ -313,25 +295,414 @@ export async function getMeta(filters?: {
   };
 }
 
-async function ensureSeeded() {
-  const { data: existing } = await supabase.from('branches').select('id').limit(1);
-  if (existing && existing.length > 0) return false;
+async function getFilteredBranchIds(filters: { brand?: string; city?: string; branchCode?: string }) {
+  let query = getClient().from('branches').select('id, code, name, city, brand');
+  const { data: branches, error } = await query;
+  if (error) throw error;
+  return (branches ?? [])
+    .filter((b) => (!filters.brand || b.brand === filters.brand) && (!filters.city || b.city === filters.city) && (!filters.branchCode || b.code === filters.branchCode))
+    .map((b) => b.id);
+}
 
-  const BRANCHES = [
-    { code: 'SW', name: 'Sleman West', city: 'Yogyakarta', brand: 'Dentico Smile' },
-    { code: 'KH', name: 'Kotabaru HQ', city: 'Yogyakarta', brand: 'Dentico Smile' },
-    { code: 'WB', name: 'Wirobrajan', city: 'Yogyakarta', brand: 'Dentico Smile' },
-    { code: 'JW', name: 'Jogja West', city: 'Yogyakarta', brand: 'Dentico Care' },
-    { code: 'ST', name: 'Seturan Central', city: 'Yogyakarta', brand: 'Dentico Care' },
-    { code: 'MD', name: 'Malioboro Kids', city: 'Yogyakarta', brand: 'Dentico Kids' },
-    { code: 'BD', name: 'Bandung Dago', city: 'Bandung', brand: 'Dentico Smile' },
-    { code: 'SP', name: 'Senopati HQ', city: 'Jakarta', brand: 'Dentico Premium' },
-  ];
+const NO_COL = { key: 'no', label: '#', align: 'center' as const };
 
-  const { data: branchRows, error: branchError } = await supabase.from('branches').insert(BRANCHES).select();
-  if (branchError) throw branchError;
+export async function buildSheet(
+  sheet: string,
+  filters: { brand?: string; city?: string; branchCode?: string },
+): Promise<SheetPayload | null> {
+  const branchIds = await getFilteredBranchIds(filters);
+  if (branchIds.length === 0) {
+    return { sheet: sheet as SheetPayload['sheet'], columns: [], rows: [] };
+  }
 
-  const byCode = new Map((branchRows ?? []).map((b) => [b.code, b.id]));
-  console.log('Seed complete: dummy workbook inserted.');
-  return true;
+  switch (sheet) {
+    case 'shift': {
+      const { data: shifts, error } = await getClient()
+        .from('shift_reports')
+        .select('*, daily_summaries!inner(id, date, sort_key, branch_id), branches!inner(id, code, name)')
+        .in('daily_summaries.branch_id', branchIds)
+        .order('daily_summaries.sort_key', { ascending: true })
+        .order('shift_index', { ascending: true });
+      if (error) throw error;
+
+      return {
+        sheet: 'shift',
+        columns: [
+          { key: 'tanggal', label: 'Tanggal' },
+          { key: 'cabang', label: 'Cabang' },
+          { key: 'shift', label: 'Shift' },
+          { key: 'pendapatan', label: '# Pendapatan' },
+          { key: 'qris', label: '# QRIS' },
+          { key: 'transfer', label: '# Transfer' },
+          { key: 'edc', label: '# EDC' },
+          { key: 'cash', label: '# Cash' },
+        ],
+        rows: (shifts ?? []).map((r) => ({
+          id: r.id,
+          summaryId: r.daily_summaries.id,
+          tanggal: dateShort(r.daily_summaries.date),
+          cabang: `${r.branches.code} — ${r.branches.name}`,
+          branchCode: r.branches.code,
+          branchName: r.branches.name,
+          shift: r.shift_index,
+          kasir: r.cashier,
+          spv: r.supervisor,
+          pendapatan: r.physical_amount,
+          qris: r.qris_amount,
+          transfer: r.transfer_amount,
+          edc: r.edc_amount,
+          cash: r.cash_amount,
+          ekspektasi: r.expected_amount,
+          selisih: r.variance,
+          status: r.status,
+        })),
+      };
+    }
+    case 'app':
+    case 'branch': {
+      const source = sheet === 'app' ? 'APP' : 'BRANCH';
+      const { data: txns, error } = await getClient()
+        .from('transactions')
+        .select('*, daily_summaries!inner(id, date, sort_key, branch_id), branches!inner(id, code, name)')
+        .eq('source', source)
+        .in('daily_summaries.branch_id', branchIds)
+        .order('daily_summaries.sort_key', { ascending: true })
+        .order('id', { ascending: true });
+      if (error) throw error;
+
+      return {
+        sheet: sheet as SheetPayload['sheet'],
+        columns: [
+          NO_COL,
+          { key: 'ref', label: sheet === 'app' ? 'Ref Transaksi' : 'Sel Sheet' },
+          { key: 'tanggal', label: 'Tanggal' },
+          { key: 'cabang', label: 'Cabang', badge: 'branch' },
+          { key: 'pasien', label: 'Pasien' },
+          { key: 'tindakan', label: 'Tindakan' },
+          { key: 'channel', label: 'Channel', align: 'center', badge: 'channel' },
+          { key: 'input', label: 'Diinput Oleh' },
+          { key: 'nominal', label: 'Nominal', align: 'right', money: true },
+          { key: 'status', label: 'Validasi', align: 'center', badge: 'match' },
+        ],
+        rows: (txns ?? []).map((r, i) => ({
+          id: r.id,
+          no: i + 1,
+          summaryId: r.daily_summaries.id,
+          ref: r.reference,
+          tanggal: dateShort(r.daily_summaries.date),
+          cabang: `${r.branches.code} — ${r.branches.name}`,
+          pasien: r.patient_name,
+          tindakan: r.treatment,
+          channel: r.channel,
+          input: r.input_by,
+          nominal: r.amount,
+          status: r.status === 'MISMATCH' ? 'MISMATCH' : r.flagged ? 'REVIEW' : 'MATCH',
+        })),
+      };
+    }
+    case 'qris':
+    case 'edc':
+    case 'transfer': {
+      const channel = sheet.toUpperCase();
+      const { data: checks, error } = await getClient()
+        .from('payment_checks')
+        .select('*, daily_summaries!inner(id, date, sort_key, branch_id), branches!inner(id, code, name)')
+        .eq('channel', channel)
+        .in('daily_summaries.branch_id', branchIds)
+        .order('daily_summaries.sort_key', { ascending: true });
+      if (error) throw error;
+
+      return {
+        sheet: sheet as SheetPayload['sheet'],
+        columns: [
+          NO_COL,
+          { key: 'tanggal', label: 'Tanggal' },
+          { key: 'cabang', label: 'Cabang', badge: 'branch' },
+          { key: 'akun', label: 'Akun Settlement' },
+          { key: 'ekspektasi', label: 'Ekspektasi (App)', align: 'right', money: true },
+          { key: 'settlement', label: 'Mutasi Bank', align: 'right', money: true },
+          { key: 'selisih', label: 'Selisih', align: 'right', money: true, sign: true },
+          { key: 'ref', label: 'Ref Settlement' },
+          { key: 'status', label: 'Status', align: 'center', badge: 'match' },
+          { key: 'catatan', label: 'Catatan' },
+        ],
+        rows: (checks ?? []).map((r, i) => ({
+          id: r.id,
+          no: i + 1,
+          summaryId: r.daily_summaries.id,
+          tanggal: dateShort(r.daily_summaries.date),
+          cabang: `${r.branches.code} — ${r.branches.name}`,
+          akun: r.account_label,
+          ekspektasi: r.expected,
+          settlement: r.actual,
+          selisih: r.actual == null ? null : r.actual - r.expected,
+          ref: r.reference || '—',
+          status: r.status,
+          catatan: r.note || '—',
+        })),
+      };
+    }
+    case 'recon': {
+      const { data: summaries, error } = await getClient()
+        .from('daily_summaries')
+        .select('*, branches!inner(id, code, name)')
+        .in('branch_id', branchIds)
+        .or("diff_app_branch.neq.0,diff_branch_shift.neq.0,status.neq.CLOSED")
+        .order('sort_key', { ascending: true });
+      if (error) throw error;
+
+      return {
+        sheet: 'recon',
+        columns: [
+          NO_COL,
+          { key: 'tanggal', label: 'Tanggal' },
+          { key: 'cabang', label: 'Cabang', badge: 'branch' },
+          { key: 'app', label: 'App Revenue', align: 'right', money: true },
+          { key: 'cab', label: 'Branch Revenue', align: 'right', money: true },
+          { key: 'shf', label: 'Shift Revenue', align: 'right', money: true },
+          { key: 'd1', label: 'Δ App−Cabang', align: 'right', money: true, sign: true },
+          { key: 'd2', label: 'Δ Cabang−Shift', align: 'right', money: true, sign: true },
+          { key: 'status', label: 'Status', align: 'center', badge: 'status' },
+        ],
+        rows: (summaries ?? []).map((r, i) => ({
+          no: i + 1,
+          summaryId: r.id,
+          tanggal: dateShort(r.date),
+          cabang: `${r.branches.code} — ${r.branches.name}`,
+          app: r.app_revenue,
+          cab: r.branch_revenue,
+          shf: r.shift_revenue,
+          d1: r.diff_app_branch,
+          d2: r.diff_branch_shift,
+          status: r.status,
+        })),
+      };
+    }
+    case 'exception': {
+      const { data: excs, error } = await getClient()
+        .from('exceptions')
+        .select('*, daily_summaries!inner(id, date, diff_app_branch, diff_branch_shift, branch_id), branches!inner(id, code, name)')
+        .in('daily_summaries.branch_id', branchIds)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+
+      return {
+        sheet: 'exception',
+        columns: [
+          NO_COL,
+          { key: 'sev', label: 'Severity', align: 'center', badge: 'severity' },
+          { key: 'tanggal', label: 'Tanggal' },
+          { key: 'cabang', label: 'Cabang', badge: 'branch' },
+          { key: 'judul', label: 'Temuan' },
+          { key: 'deskripsi', label: 'Detail' },
+          { key: 'owner', label: 'Owner' },
+          { key: 'selisih', label: 'Nominal Varian', align: 'right', money: true, sign: true },
+          { key: 'status', label: 'Status', align: 'center', badge: 'status' },
+        ],
+        rows: (excs ?? []).map((r, i) => ({
+          no: i + 1,
+          id: r.id,
+          summaryId: r.daily_summaries.id,
+          sev: r.severity,
+          tanggal: dateShort(r.daily_summaries.date),
+          cabang: `${r.branches.code} — ${r.branches.name}`,
+          judul: r.title,
+          deskripsi: r.description,
+          owner: r.owner,
+          selisih: Math.max(Math.abs(r.daily_summaries.diff_app_branch), Math.abs(r.daily_summaries.diff_branch_shift)) * -1 || null,
+          status: r.status,
+        })),
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+function digest(input: string) {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return `0x${(h >>> 0).toString(16).padStart(8, '0')}${((h ^ 0xabcdef) >>> 0).toString(16).padStart(8, '0')}`.slice(0, 18);
+}
+
+export async function resolveSummary(summaryId: number) {
+  const { data: lastLog } = await getClient()
+    .from('audit_logs')
+    .select('hash')
+    .order('id', { ascending: true })
+    .limit(1)
+    .single();
+
+  await getClient().from('exceptions').update({ status: 'RESOLVED' }).eq('summary_id', summaryId);
+  await getClient().from('daily_summaries').update({ status: 'CLOSED' }).eq('id', summaryId);
+  const prevHash = lastLog?.hash ?? digest('genesis-dentico');
+  await getClient().from('audit_logs').insert({
+    summary_id: summaryId,
+    action: 'RESOLVED_CLOSED',
+    actor: 'Siti Rahmawati',
+    role: 'Finance Controller',
+    detail: 'Selisih diverifikasi controller — penyesuaian dicatat di Reconciliation, exception ditutup & sheet dikunci.',
+    hash: digest(`${prevHash}RESOLVED_CLOSED${summaryId}${Date.now()}`),
+    prev_hash: prevHash,
+    verified: true,
+  });
+}
+
+export async function addNote(summaryId: number, note: string) {
+  const { data: lastLog } = await getClient()
+    .from('audit_logs')
+    .select('hash')
+    .order('id', { ascending: true })
+    .limit(1)
+    .single();
+
+  const prevHash = lastLog?.hash ?? digest('genesis-dentico');
+  await getClient().from('audit_logs').insert({
+    summary_id: summaryId,
+    action: 'CONTROLLER_NOTE',
+    actor: 'Siti Rahmawati',
+    role: 'Finance Controller',
+    detail: note.slice(0, 400),
+    hash: digest(`${prevHash}NOTE${summaryId}${Date.now()}`),
+    prev_hash: prevHash,
+    verified: true,
+  });
+}
+
+export async function reopenSummary(summaryId: number) {
+  await getClient().from('daily_summaries').update({ status: 'OPEN' }).eq('id', summaryId);
+}
+
+export async function updateShiftReport(
+  rowId: number,
+  data: {
+    qrisAmount?: number;
+    transferAmount?: number;
+    edcAmount?: number;
+    cashAmount?: number;
+    note?: string;
+  }
+) {
+  const { data: current, error: currentError } = await getClient()
+    .from('shift_reports')
+    .select('*')
+    .eq('id', rowId)
+    .single();
+  if (currentError || !current) throw new Error('Row not found');
+
+  const qris = data.qrisAmount ?? current.qris_amount;
+  const transfer = data.transferAmount ?? current.transfer_amount;
+  const edc = data.edcAmount ?? current.edc_amount;
+  const cash = data.cashAmount ?? current.cash_amount;
+  const physical = qris + transfer + edc + cash;
+  const variance = physical - current.expected_amount;
+  const status = variance === 0 ? 'MATCH' : variance > 0 ? 'OVER' : 'UNDER';
+
+  const { data: updated, error: updateError } = await getClient()
+    .from('shift_reports')
+    .update({
+      qris_amount: qris,
+      transfer_amount: transfer,
+      edc_amount: edc,
+      cash_amount: cash,
+      physical_amount: physical,
+      variance,
+      status,
+      note: data.note ?? current.note,
+    })
+    .eq('id', rowId)
+    .select()
+    .single();
+
+  if (updateError) throw updateError;
+  return updated;
+}
+
+// Payment Checks (QRIS, EDC, Transfer) helpers
+export async function updatePaymentCheck(
+  rowId: number,
+  data: { expected?: number; actual?: number | null; reference?: string; status?: string; note?: string }
+) {
+  const { data: updated, error } = await getClient()
+    .from('payment_checks')
+    .update(data)
+    .eq('id', rowId)
+    .select()
+    .single();
+  if (error) throw error;
+  return updated;
+}
+
+export async function createPaymentCheck(
+  data: {
+    summary_id: number;
+    channel: 'QRIS' | 'EDC' | 'TRANSFER';
+    account_label: string;
+    expected: number;
+    actual?: number | null;
+    status?: string;
+    reference?: string;
+    note?: string;
+  }
+) {
+  const { data: created, error } = await getClient()
+    .from('payment_checks')
+    .insert(data)
+    .select()
+    .single();
+  if (error) throw error;
+  return created;
+}
+
+// Transactions helpers
+export async function updateTransaction(
+  rowId: number,
+  data: {
+    summary_id?: number;
+    reference?: string;
+    patient_name?: string;
+    treatment?: string;
+    channel?: string;
+    amount?: number;
+    input_by?: string;
+    status?: string;
+    note?: string;
+    flagged?: boolean;
+  }
+) {
+  const { data: updated, error } = await getClient()
+    .from('transactions')
+    .update(data)
+    .eq('id', rowId)
+    .select()
+    .single();
+  if (error) throw error;
+  return updated;
+}
+
+export async function createTransaction(
+  data: {
+    summary_id: number;
+    source: 'APP' | 'BRANCH' | 'SHIFT';
+    reference: string;
+    patient_name: string;
+    treatment: string;
+    channel: string;
+    amount: number;
+    input_by: string;
+    status: string;
+    note: string;
+    flagged: boolean;
+  }
+) {
+  const { data: created, error } = await getClient()
+    .from('transactions')
+    .insert(data)
+    .select()
+    .single();
+  if (error) throw error;
+  return created;
 }

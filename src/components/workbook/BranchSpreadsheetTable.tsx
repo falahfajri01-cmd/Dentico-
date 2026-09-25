@@ -5,6 +5,7 @@ import { Download, Plus, RefreshCcw, Table2 } from "lucide-react";
 import type { SheetPayload } from "@/lib/types";
 import { cn } from "./cn";
 import { Skeleton } from "./ui";
+import { createTransaction, updateTransaction } from "@/lib/queries";
 
 interface Props {
   payload: SheetPayload | null;
@@ -16,7 +17,7 @@ interface Props {
   onSourceChanged?: () => void | Promise<void>;
 }
 
-type Row = Record<string, string | number | null> & { id?: number };
+type Row = Record<string, string | number | null> & { id?: number; summaryId?: number };
 type SaveState = "idle" | "saving" | "saved" | "error";
 
 function parsePaste(text: string) {
@@ -36,20 +37,16 @@ export default function BranchSpreadsheetTable({ payload, loading, activeBrand, 
   async function patchRow(id: number, row: Row) {
     setSaveState((s) => ({ ...s, [id]: "saving" }));
     try {
-      await fetch(`/api/source-grid/branch/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          brand: activeBrand,
-          city: activeCity,
-          tanggal: row.tanggal,
-          cabang: row.cabang,
-          pasien: row.pasien,
-          nominal: Number(row.nominal ?? 0),
-          channel: row.channel,
-          ref: row.ref,
-          tindakan: row.tindakan,
-        }),
+      await updateTransaction(id, {
+        reference: String(row.ref ?? ""),
+        patient_name: String(row.pasien ?? ""),
+        treatment: String(row.tindakan ?? "Manual Entry"),
+        channel: String(row.channel ?? "CASH").toUpperCase(),
+        amount: Number(row.nominal ?? 0),
+        input_by: "Inline Grid",
+        status: String(row.status ?? "OK") === "MISMATCH" ? "MISMATCH" : "OK",
+        note: "Auto-saved spreadsheet row",
+        flagged: String(row.status ?? "") === "MISMATCH" || String(row.status ?? "") === "REVIEW",
       });
       setSaveState((s) => ({ ...s, [id]: "saved" }));
       setTimeout(() => setSaveState((s) => ({ ...s, [id]: "idle" })), 1500);
@@ -76,14 +73,20 @@ export default function BranchSpreadsheetTable({ payload, loading, activeBrand, 
   }
 
   async function addRow() {
-    await fetch(`/api/source-grid/branch`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        brand: activeBrand,
-        city: activeCity,
-        rows: [{ tanggal: "21 Sep 2026", cabang: activeBranchCode, pasien: "", nominal: 0, channel: "CASH", tindakan: "Manual Entry" }],
-      }),
+    const branchRows = payload?.rows.filter(r => r.branchCode === activeBranchCode) ?? [];
+    const summaryId = Number(branchRows[0]?.summaryId ?? 0);
+    await createTransaction({
+      summary_id: summaryId,
+      source: 'BRANCH',
+      reference: `Row-NEW-${Date.now()}`,
+      patient_name: "",
+      treatment: "Manual Entry",
+      channel: "CASH",
+      amount: 0,
+      input_by: "Inline Grid",
+      status: "OK",
+      note: "Auto-saved spreadsheet row",
+      flagged: false,
     });
     await onSourceChanged?.();
   }
@@ -92,21 +95,23 @@ export default function BranchSpreadsheetTable({ payload, loading, activeBrand, 
     const grid = parsePaste(e.clipboardData.getData("text/plain"));
     if (grid.length <= 1 && grid[0]?.length <= 1) return;
     e.preventDefault();
+    const branchRows = payload?.rows.filter(r => r.branchCode === activeBranchCode) ?? [];
+    const summaryId = Number(branchRows[0]?.summaryId ?? 0);
     const prepared = grid.map((cols) => ({
-      tanggal: cols[0] || "21 Sep 2026",
-      pasien: cols[1] || "",
-      nominal: Number((cols[2] || "0").replace(/\D/g, "")),
-      cabang: cols[3] || activeBranchCode,
+      summary_id: summaryId,
+      source: 'BRANCH' as const,
+      reference: `${startKey}-${Date.now()}`,
+      patient_name: cols[1] || "",
+      treatment: "Bulk Paste",
       channel: (cols[4] || "CASH").toUpperCase(),
-      tindakan: "Bulk Paste",
-      ref: `${startKey}-${Date.now()}`,
+      amount: Number((cols[2] || "0").replace(/\D/g, "")),
+      input_by: "Clipboard Paste",
+      status: "OK",
+      note: "Auto-saved spreadsheet row",
+      flagged: false,
     }));
     setBulkInfo(`${prepared.length} rows detected — auto-saving...`);
-    await fetch(`/api/source-grid/branch`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ brand: activeBrand, city: activeCity, rows: prepared }),
-    });
+    await Promise.all(prepared.map(p => createTransaction(p)));
     setBulkInfo(`${prepared.length} rows saved`);
     setTimeout(() => setBulkInfo(""), 1800);
     await onSourceChanged?.();
