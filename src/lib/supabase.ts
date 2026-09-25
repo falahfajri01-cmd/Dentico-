@@ -4,12 +4,16 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 // Fallback to process.env for Next.js dev mode
 function getEnv(key: string): string | undefined {
   if (typeof window !== 'undefined' && window.__ENV__) {
+    console.log(`[Supabase] Reading ${key} from window.__ENV__`);
     return window.__ENV__[key];
   }
   // Fallback for dev mode - Next.js provides process.env.NEXT_PUBLIC_* at runtime
   if (typeof process !== 'undefined' && process.env) {
-    return process.env[key];
+    const val = process.env[key];
+    console.log(`[Supabase] Reading ${key} from process.env:`, val ? 'FOUND' : 'NOT FOUND');
+    return val;
   }
+  console.log(`[Supabase] ${key} NOT FOUND - no env source available`);
   return undefined;
 }
 
@@ -34,6 +38,7 @@ export function getSupabase(): SupabaseClient | null {
     }
     
     try {
+      console.log('[Supabase] Creating client with URL:', supabaseUrl);
       supabaseInstance = createClient(supabaseUrl, supabaseAnonKey);
     } catch (err) {
       console.error('Failed to create Supabase client:', err);
