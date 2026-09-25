@@ -138,9 +138,9 @@ create index audit_logs_summary_idx on audit_logs(summary_id);
 create index audit_logs_created_idx on audit_logs(created_at desc);
 
 -- ============================================
--- ROW LEVEL SECURITY (RLS) - Optional
+-- ROW LEVEL SECURITY (RLS)
 -- ============================================
--- Enable RLS on all tables (adjust policies as needed)
+-- Enable RLS on all tables
 alter table branches enable row level security;
 alter table daily_summaries enable row level security;
 alter table transactions enable row level security;
@@ -149,7 +149,16 @@ alter table payment_checks enable row level security;
 alter table exceptions enable row level security;
 alter table audit_logs enable row level security;
 
--- Allow all operations for authenticated users (adjust for production)
+-- Allow all operations for anon key (public access) - for static export app
+create policy "Allow all for anon" on branches for all using (true) with check (true);
+create policy "Allow all for anon" on daily_summaries for all using (true) with check (true);
+create policy "Allow all for anon" on transactions for all using (true) with check (true);
+create policy "Allow all for anon" on shift_reports for all using (true) with check (true);
+create policy "Allow all for anon" on payment_checks for all using (true) with check (true);
+create policy "Allow all for anon" on exceptions for all using (true) with check (true);
+create policy "Allow all for anon" on audit_logs for all using (true) with check (true);
+
+-- Also allow authenticated users (for future auth integration)
 create policy "Allow all for authenticated" on branches for all using (auth.role() = 'authenticated');
 create policy "Allow all for authenticated" on daily_summaries for all using (auth.role() = 'authenticated');
 create policy "Allow all for authenticated" on transactions for all using (auth.role() = 'authenticated');
