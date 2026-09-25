@@ -5,9 +5,13 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 const COLS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
 
-function getClient(): SupabaseClient {
+// Check if we're in a browser environment
+const isBrowser = typeof window !== 'undefined' && typeof document !== 'undefined';
+
+function getClient(): SupabaseClient | null {
   const client = getSupabase();
-  if (!client) throw new Error('Supabase client not available (must run in browser)');
+  // During build/SSR, return null instead of throwing
+  if (!client) return null;
   return client;
 }
 
@@ -33,7 +37,10 @@ function channelState(checks: Array<{ channel: string; status: string }>, channe
 }
 
 async function getBranchUniverse(filters: { brand?: string; city?: string; branchCode?: string; q?: string }) {
-  let query = getClient().from('branches').select('*').order('code', { ascending: true });
+  const client = getClient();
+  if (!client) return { allBranches: [] as any[], filteredBranches: [] as any[] };
+  
+  let query = client.from('branches').select('*').order('code', { ascending: true });
   const { data: allBranches, error } = await query;
   if (error) throw error;
 
@@ -58,10 +65,19 @@ async function getAggregatedSourceMaps(summaryIds: number[]) {
     };
   }
 
+  const client = getClient();
+  if (!client) {
+    return {
+      txns: [] as Array<{ summary_id: number; source: string; amount: number }>,
+      shifts: [] as Array<{ summary_id: number; physical_amount: number; shift_index: number }>,
+      checks: [] as Array<{ summary_id: number; channel: string; status: string }>,
+    };
+  }
+  
   const [txnsRes, shiftsRes, checksRes] = await Promise.all([
-    getClient().from('transactions').select('summary_id, source, amount').in('summary_id', summaryIds),
-    getClient().from('shift_reports').select('summary_id, physical_amount, shift_index').in('summary_id', summaryIds),
-    getClient().from('payment_checks').select('summary_id, channel, status').in('summary_id', summaryIds),
+    client.from('transactions').select('summary_id, source, amount').in('summary_id', summaryIds),
+    client.from('shift_reports').select('summary_id, physical_amount, shift_index').in('summary_id', summaryIds),
+    client.from('payment_checks').select('summary_id, channel, status').in('summary_id', summaryIds),
   ]);
 
   if (txnsRes.error) throw txnsRes.error;
@@ -131,6 +147,17 @@ export async function listSummaries(opts: {
   page: number;
   pageSize: number;
 }) {
+  const client = getClient();
+  if (!client) {
+    return {
+      rows: [] as SummaryRow[],
+      total: 0,
+      page: opts.page,
+      pageSize: opts.pageSize,
+      counts: { total: 0, CLOSED: 0, FOLLOW_UP: 0, OPEN: 0 },
+    };
+  }
+
   const { allBranches, filteredBranches } = await getBranchUniverse(opts);
   if (filteredBranches.length === 0) {
     return {
@@ -143,7 +170,7 @@ export async function listSummaries(opts: {
   }
 
   const branchIds = filteredBranches.map((b) => b.id);
-  const { data: summaryRows, error } = await getClient()
+  const { data: summaryRows, error } = await client
     .from('daily_summaries')
     .select('*')
     .in('branch_id', branchIds)
@@ -192,9 +219,12 @@ export async function getSummaryCounts(filters: { brand?: string; city?: string;
 }
 
 export async function getDetail(id: number) {
+  const client = getClient();
+  if (!client) return null;
+
   const [summaryRes, branchesRes] = await Promise.all([
-    getClient().from('daily_summaries').select('*').eq('id', id).single(),
-    getClient().from('branches').select('*'),
+    client.from('daily_summaries').select('*').eq('id', id).single(),
+    client.from('branches').select('*'),
   ]);
   if (summaryRes.error || !summaryRes.data) return null;
   if (branchesRes.error) throw branchesRes.error;
@@ -204,11 +234,11 @@ export async function getDetail(id: number) {
   if (!branch) return null;
 
   const [txnsRes, shiftsRes, paysRes, excsRes, logsRes] = await Promise.all([
-    getClient().from('transactions').select('*').eq('summary_id', id),
-    getClient().from('shift_reports').select('*').eq('summary_id', id),
-    getClient().from('payment_checks').select('*').eq('summary_id', id),
-    getClient().from('exceptions').select('*').eq('summary_id', id),
-    getClient().from('audit_logs').select('*').eq('summary_id', id).order('created_at', { ascending: false }).limit(8),
+    client.from('transactions').select('*').eq('summary_id', id),
+    client.from('shift_reports').select('*').eq('summary_id', id),
+    client.from('payment_checks').select('*').eq('summary_id', id),
+    client.from('exceptions').select('*').eq('summary_id', id),
+    client.from('audit_logs').select('*').eq('summary_id', id).order('created_at', { ascending: false }).limit(8),
   ]);
 
   if (txnsRes.error) throw txnsRes.error;
@@ -230,6 +260,20 @@ export async function getDetail(id: number) {
 }
 
 export async function getMeta(filters?: { brand?: string; city?: string; branchCode?: string }) {
+  const client = getClient();
+  if (!client) {
+    return {
+      period: '',
+      counts: { total: 0, CLOSED: 0, FOLLOW_UP: 0, OPEN: 0 },
+      totals: { app: 0, branch: 0, shift: 0, openVariance: 0, matchRate: 0 },
+      branches: [],
+      cities: [],
+      brands: [],
+      alerts: [],
+      logs: [],
+    };
+  }
+
   const { allBranches, filteredBranches } = await getBranchUniverse(filters ?? {});
   const overview = await listSummaries({ ...(filters ?? {}), page: 1, pageSize: 1000 });
   const allSummaries = overview.rows;
@@ -247,7 +291,7 @@ export async function getMeta(filters?: { brand?: string; city?: string; branchC
   const summaryIds = overview.rows.map((r) => r.id);
   let exceptionRows: Array<{ e: any; s: any; b: any }> = [];
   if (summaryIds.length > 0) {
-    const { data, error } = await getClient()
+    const { data, error } = await client
       .from('exceptions')
       .select('*, daily_summaries!inner(*, branches!inner(*))')
       .in('summary_id', summaryIds)
@@ -260,7 +304,7 @@ export async function getMeta(filters?: { brand?: string; city?: string; branchC
     }));
   }
 
-  const { data: recentLogs, error: logsError } = await getClient()
+  const { data: recentLogs, error: logsError } = await client
     .from('audit_logs')
     .select('*')
     .order('created_at', { ascending: false })
@@ -296,7 +340,10 @@ export async function getMeta(filters?: { brand?: string; city?: string; branchC
 }
 
 async function getFilteredBranchIds(filters: { brand?: string; city?: string; branchCode?: string }) {
-  let query = getClient().from('branches').select('id, code, name, city, brand');
+  const client = getClient();
+  if (!client) return [];
+
+  let query = client.from('branches').select('id, code, name, city, brand');
   const { data: branches, error } = await query;
   if (error) throw error;
   return (branches ?? [])
@@ -310,6 +357,9 @@ export async function buildSheet(
   sheet: string,
   filters: { brand?: string; city?: string; branchCode?: string },
 ): Promise<SheetPayload | null> {
+  const client = getClient();
+  if (!client) return { sheet: sheet as SheetPayload['sheet'], columns: [], rows: [] };
+
   const branchIds = await getFilteredBranchIds(filters);
   if (branchIds.length === 0) {
     return { sheet: sheet as SheetPayload['sheet'], columns: [], rows: [] };
@@ -317,7 +367,7 @@ export async function buildSheet(
 
   switch (sheet) {
     case 'shift': {
-      const { data: shifts, error } = await getClient()
+      const { data: shifts, error } = await client
         .from('shift_reports')
         .select('*, daily_summaries!inner(id, date, sort_key, branch_id), branches!inner(id, code, name)')
         .in('daily_summaries.branch_id', branchIds)
@@ -361,7 +411,7 @@ export async function buildSheet(
     case 'app':
     case 'branch': {
       const source = sheet === 'app' ? 'APP' : 'BRANCH';
-      const { data: txns, error } = await getClient()
+      const { data: txns, error } = await client
         .from('transactions')
         .select('*, daily_summaries!inner(id, date, sort_key, branch_id), branches!inner(id, code, name)')
         .eq('source', source)
@@ -404,7 +454,7 @@ export async function buildSheet(
     case 'edc':
     case 'transfer': {
       const channel = sheet.toUpperCase();
-      const { data: checks, error } = await getClient()
+      const { data: checks, error } = await client
         .from('payment_checks')
         .select('*, daily_summaries!inner(id, date, sort_key, branch_id), branches!inner(id, code, name)')
         .eq('channel', channel)
@@ -443,7 +493,7 @@ export async function buildSheet(
       };
     }
     case 'recon': {
-      const { data: summaries, error } = await getClient()
+      const { data: summaries, error } = await client
         .from('daily_summaries')
         .select('*, branches!inner(id, code, name)')
         .in('branch_id', branchIds)
@@ -479,7 +529,7 @@ export async function buildSheet(
       };
     }
     case 'exception': {
-      const { data: excs, error } = await getClient()
+      const { data: excs, error } = await client
         .from('exceptions')
         .select('*, daily_summaries!inner(id, date, diff_app_branch, diff_branch_shift, branch_id), branches!inner(id, code, name)')
         .in('daily_summaries.branch_id', branchIds)
@@ -529,17 +579,20 @@ function digest(input: string) {
 }
 
 export async function resolveSummary(summaryId: number) {
-  const { data: lastLog } = await getClient()
+  const client = getClient();
+  if (!client) return;
+
+  const { data: lastLog } = await client
     .from('audit_logs')
     .select('hash')
     .order('id', { ascending: true })
     .limit(1)
     .single();
 
-  await getClient().from('exceptions').update({ status: 'RESOLVED' }).eq('summary_id', summaryId);
-  await getClient().from('daily_summaries').update({ status: 'CLOSED' }).eq('id', summaryId);
+  await client.from('exceptions').update({ status: 'RESOLVED' }).eq('summary_id', summaryId);
+  await client.from('daily_summaries').update({ status: 'CLOSED' }).eq('id', summaryId);
   const prevHash = lastLog?.hash ?? digest('genesis-dentico');
-  await getClient().from('audit_logs').insert({
+  await client.from('audit_logs').insert({
     summary_id: summaryId,
     action: 'RESOLVED_CLOSED',
     actor: 'Siti Rahmawati',
@@ -552,7 +605,10 @@ export async function resolveSummary(summaryId: number) {
 }
 
 export async function addNote(summaryId: number, note: string) {
-  const { data: lastLog } = await getClient()
+  const client = getClient();
+  if (!client) return;
+
+  const { data: lastLog } = await client
     .from('audit_logs')
     .select('hash')
     .order('id', { ascending: true })
@@ -560,7 +616,7 @@ export async function addNote(summaryId: number, note: string) {
     .single();
 
   const prevHash = lastLog?.hash ?? digest('genesis-dentico');
-  await getClient().from('audit_logs').insert({
+  await client.from('audit_logs').insert({
     summary_id: summaryId,
     action: 'CONTROLLER_NOTE',
     actor: 'Siti Rahmawati',
@@ -573,7 +629,9 @@ export async function addNote(summaryId: number, note: string) {
 }
 
 export async function reopenSummary(summaryId: number) {
-  await getClient().from('daily_summaries').update({ status: 'OPEN' }).eq('id', summaryId);
+  const client = getClient();
+  if (!client) return;
+  await client.from('daily_summaries').update({ status: 'OPEN' }).eq('id', summaryId);
 }
 
 export async function updateShiftReport(
@@ -586,7 +644,10 @@ export async function updateShiftReport(
     note?: string;
   }
 ) {
-  const { data: current, error: currentError } = await getClient()
+  const client = getClient();
+  if (!client) throw new Error('Supabase client not available');
+
+  const { data: current, error: currentError } = await client
     .from('shift_reports')
     .select('*')
     .eq('id', rowId)
@@ -601,7 +662,7 @@ export async function updateShiftReport(
   const variance = physical - current.expected_amount;
   const status = variance === 0 ? 'MATCH' : variance > 0 ? 'OVER' : 'UNDER';
 
-  const { data: updated, error: updateError } = await getClient()
+  const { data: updated, error: updateError } = await client
     .from('shift_reports')
     .update({
       qris_amount: qris,
@@ -626,7 +687,10 @@ export async function updatePaymentCheck(
   rowId: number,
   data: { expected?: number; actual?: number | null; reference?: string; status?: string; note?: string }
 ) {
-  const { data: updated, error } = await getClient()
+  const client = getClient();
+  if (!client) throw new Error('Supabase client not available');
+
+  const { data: updated, error } = await client
     .from('payment_checks')
     .update(data)
     .eq('id', rowId)
@@ -648,7 +712,10 @@ export async function createPaymentCheck(
     note?: string;
   }
 ) {
-  const { data: created, error } = await getClient()
+  const client = getClient();
+  if (!client) throw new Error('Supabase client not available');
+
+  const { data: created, error } = await client
     .from('payment_checks')
     .insert(data)
     .select()
@@ -673,7 +740,10 @@ export async function updateTransaction(
     flagged?: boolean;
   }
 ) {
-  const { data: updated, error } = await getClient()
+  const client = getClient();
+  if (!client) throw new Error('Supabase client not available');
+
+  const { data: updated, error } = await client
     .from('transactions')
     .update(data)
     .eq('id', rowId)
@@ -698,7 +768,10 @@ export async function createTransaction(
     flagged: boolean;
   }
 ) {
-  const { data: created, error } = await getClient()
+  const client = getClient();
+  if (!client) throw new Error('Supabase client not available');
+
+  const { data: created, error } = await client
     .from('transactions')
     .insert(data)
     .select()
