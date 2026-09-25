@@ -3,8 +3,11 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 let supabaseInstance: SupabaseClient | null = null;
 
 export function getSupabase(): SupabaseClient | null {
+  // Check if we're in a browser environment
+  const isBrowser = typeof window !== 'undefined' && typeof document !== 'undefined';
+  
   // During build/SSR, return null to avoid requiring env vars
-  if (typeof window === 'undefined' || process.env.NEXT_PHASE === 'phase-production-build') {
+  if (!isBrowser) {
     return null;
   }
   
@@ -24,4 +27,4 @@ export function getSupabase(): SupabaseClient | null {
 }
 
 // For backward compatibility - only use in client components
-export const supabase = typeof window !== 'undefined' ? getSupabase() : null;
+export const supabase = getSupabase();
