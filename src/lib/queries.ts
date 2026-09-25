@@ -1,17 +1,6 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
-import { db } from "@/db";
-import {
-  auditLogs,
-  branches,
-  dailySummaries,
-  exceptions,
-  paymentChecks,
-  shiftReports,
-  transactions,
-} from "@/db/schema";
-import { ensureSeeded } from "@/db/seed";
-import type { MatchState, SummaryRow } from "@/lib/types";
-import { dateShort } from "@/lib/format";
+import { supabase } from '@/lib/supabase';
+import type { MatchState, SummaryRow } from '@/lib/types';
+import { dateShort } from '@/lib/format';
 
 let seedPromise: Promise<unknown> | null = null;
 export function seeded() {
@@ -24,10 +13,7 @@ export function seeded() {
   return seedPromise;
 }
 
-const COLS = ["A", "B", "C", "D", "E", "F", "G", "H"];
-
-type BranchRow = typeof branches.$inferSelect;
-type SummaryRowDb = typeof dailySummaries.$inferSelect;
+const COLS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
 
 function statusFromSources(params: {
   diffAppBranch: number;
@@ -36,18 +22,18 @@ function statusFromSources(params: {
   qris: MatchState;
   edc: MatchState;
   transfer: MatchState;
-}): SummaryRow["status"] {
+}): SummaryRow['status'] {
   const hasHardVariance = params.diffAppBranch !== 0 || params.diffBranchShift !== 0;
-  const hasPending = [params.qris, params.edc, params.transfer].includes("PENDING");
-  const hasException = [params.qris, params.edc, params.transfer].includes("EXCEPTION");
-  if (hasHardVariance || params.shiftDone < 3) return "OPEN";
-  if (hasPending || hasException) return "FOLLOW_UP";
-  return "CLOSED";
+  const hasPending = [params.qris, params.edc, params.transfer].includes('PENDING');
+  const hasException = [params.qris, params.edc, params.transfer].includes('EXCEPTION');
+  if (hasHardVariance || params.shiftDone < 3) return 'OPEN';
+  if (hasPending || hasException) return 'FOLLOW_UP';
+  return 'CLOSED';
 }
 
-function channelState(checks: typeof paymentChecks.$inferSelect[], channel: "QRIS" | "EDC" | "TRANSFER"): MatchState {
+function channelState(checks: Array<{ channel: string; status: string }>, channel: 'QRIS' | 'EDC' | 'TRANSFER'): MatchState {
   const item = checks.find((c) => c.channel === channel);
-  return (item?.status as MatchState | undefined) ?? "NONE";
+  return (item?.status as MatchState | undefined) ?? 'NONE';
 }
 
 async function getBranchUniverse(filters: {
@@ -56,8 +42,11 @@ async function getBranchUniverse(filters: {
   branchCode?: string;
   q?: string;
 }) {
-  const allBranches = await db.select().from(branches).orderBy(asc(branches.code));
-  const filteredBranches = allBranches.filter((b) => {
+  let query = supabase.from('branches').select('*').order('code', { ascending: true });
+  const { data: allBranches, error } = await query;
+  if (error) throw error;
+
+  const filteredBranches = (allBranches ?? []).filter((b) => {
     const matchBrand = !filters.brand || b.brand === filters.brand;
     const matchCity = !filters.city || b.city === filters.city;
     const matchBranch = !filters.branchCode || b.code === filters.branchCode;
@@ -65,46 +54,56 @@ async function getBranchUniverse(filters: {
       !filters.q || `${b.code} ${b.name} ${b.city} ${b.brand}`.toLowerCase().includes(filters.q.toLowerCase());
     return matchBrand && matchCity && matchBranch && matchQ;
   });
-  return { allBranches, filteredBranches };
+  return { allBranches: allBranches ?? [], filteredBranches };
 }
 
 async function getAggregatedSourceMaps(summaryIds: number[]) {
   if (summaryIds.length === 0) {
     return {
-      txns: [] as typeof transactions.$inferSelect[],
-      shifts: [] as typeof shiftReports.$inferSelect[],
-      checks: [] as typeof paymentChecks.$inferSelect[],
+      txns: [] as Array<{ summary_id: number; source: string; amount: number }>,
+      shifts: [] as Array<{ summary_id: number; physical_amount: number }>,
+      checks: [] as Array<{ summary_id: number; channel: string; status: string }>,
     };
   }
-  const [txns, shifts, checks] = await Promise.all([
-    db.select().from(transactions).where(inArray(transactions.summaryId, summaryIds)),
-    db.select().from(shiftReports).where(inArray(shiftReports.summaryId, summaryIds)),
-    db.select().from(paymentChecks).where(inArray(paymentChecks.summaryId, summaryIds)),
+
+  const [txnsRes, shiftsRes, checksRes] = await Promise.all([
+    supabase.from('transactions').select('summary_id, source, amount').in('summary_id', summaryIds),
+    supabase.from('shift_reports').select('summary_id, physical_amount').in('summary_id', summaryIds),
+    supabase.from('payment_checks').select('summary_id, channel, status').in('summary_id', summaryIds),
   ]);
-  return { txns, shifts, checks };
+
+  if (txnsRes.error) throw txnsRes.error;
+  if (shiftsRes.error) throw shiftsRes.error;
+  if (checksRes.error) throw checksRes.error;
+
+  return {
+    txns: txnsRes.data ?? [],
+    shifts: shiftsRes.data ?? [],
+    checks: checksRes.data ?? [],
+  };
 }
 
 function aggregateForSummary(
-  summary: SummaryRowDb,
-  branch: BranchRow,
-  txns: typeof transactions.$inferSelect[],
-  shifts: typeof shiftReports.$inferSelect[],
-  checks: typeof paymentChecks.$inferSelect[],
+  summary: { id: number; branch_id: number; date: string; shift_done: number; app_revenue: number; branch_revenue: number; shift_revenue: number; diff_app_branch: number; diff_branch_shift: number; status: string; sort_key: number },
+  branch: { id: number; code: string; name: string; city: string; brand: string },
+  txns: Array<{ summary_id: number; source: string; amount: number }>,
+  shifts: Array<{ summary_id: number; physical_amount: number }>,
+  checks: Array<{ summary_id: number; channel: string; status: string }>,
   rowIndex: number,
 ): SummaryRow {
-  const localTx = txns.filter((t) => t.summaryId === summary.id);
-  const localShifts = shifts.filter((s) => s.summaryId === summary.id);
-  const localChecks = checks.filter((c) => c.summaryId === summary.id);
+  const localTx = txns.filter((t) => t.summary_id === summary.id);
+  const localShifts = shifts.filter((s) => s.summary_id === summary.id);
+  const localChecks = checks.filter((c) => c.summary_id === summary.id);
 
-  const appRevenue = localTx.filter((t) => t.source === "APP").reduce((s, t) => s + t.amount, 0);
-  const branchRevenue = localTx.filter((t) => t.source === "BRANCH").reduce((s, t) => s + t.amount, 0);
-  const shiftRevenue = localShifts.reduce((s, t) => s + t.physicalAmount, 0);
-  const shiftDone = new Set(localShifts.map((s) => s.shiftIndex)).size;
+  const appRevenue = localTx.filter((t) => t.source === 'APP').reduce((s, t) => s + t.amount, 0);
+  const branchRevenue = localTx.filter((t) => t.source === 'BRANCH').reduce((s, t) => s + t.amount, 0);
+  const shiftRevenue = localShifts.reduce((s, t) => s + t.physical_amount, 0);
+  const shiftDone = new Set(localShifts.map((s) => s.shift_index)).size;
   const diffAppBranch = appRevenue - branchRevenue;
   const diffBranchShift = branchRevenue - shiftRevenue;
-  const qris = channelState(localChecks, "QRIS");
-  const edc = channelState(localChecks, "EDC");
-  const transfer = channelState(localChecks, "TRANSFER");
+  const qris = channelState(localChecks, 'QRIS');
+  const edc = channelState(localChecks, 'EDC');
+  const transfer = channelState(localChecks, 'TRANSFER');
   const status = statusFromSources({ diffAppBranch, diffBranchShift, shiftDone, qris, edc, transfer });
 
   return {
@@ -152,17 +151,22 @@ export async function listSummaries(opts: {
     };
   }
 
-  const summaryRows = await db
-    .select({ s: dailySummaries, b: branches })
-    .from(dailySummaries)
-    .innerJoin(branches, eq(dailySummaries.branchId, branches.id))
-    .where(inArray(dailySummaries.branchId, filteredBranches.map((b) => b.id)))
-    .orderBy(asc(dailySummaries.date), asc(branches.code), asc(dailySummaries.sortKey));
+  const branchIds = filteredBranches.map((b) => b.id);
+  const { data: summaryRows, error } = await supabase
+    .from('daily_summaries')
+    .select('*')
+    .in('branch_id', branchIds)
+    .order('date', { ascending: true })
+    .order('sort_key', { ascending: true });
 
-  const maps = await getAggregatedSourceMaps(summaryRows.map((r) => r.s.id));
-  let computed = summaryRows.map((r, i) => aggregateForSummary(r.s, r.b, maps.txns, maps.shifts, maps.checks, i + 1));
+  if (error) throw error;
 
-  if (opts.status && ["CLOSED", "FOLLOW_UP", "OPEN"].includes(opts.status)) {
+  const maps = await getAggregatedSourceMaps((summaryRows ?? []).map((r) => r.id));
+  let computed = (summaryRows ?? []).map((r, i) =>
+    aggregateForSummary(r, filteredBranches.find((b) => b.id === r.branch_id)!, maps.txns, maps.shifts, maps.checks, i + 1)
+  );
+
+  if (opts.status && ['CLOSED', 'FOLLOW_UP', 'OPEN'].includes(opts.status)) {
     computed = computed.filter((r) => r.status === opts.status);
   }
   if (opts.q) {
@@ -172,9 +176,9 @@ export async function listSummaries(opts: {
 
   const counts = {
     total: computed.length,
-    CLOSED: computed.filter((r) => r.status === "CLOSED").length,
-    FOLLOW_UP: computed.filter((r) => r.status === "FOLLOW_UP").length,
-    OPEN: computed.filter((r) => r.status === "OPEN").length,
+    CLOSED: computed.filter((r) => r.status === 'CLOSED').length,
+    FOLLOW_UP: computed.filter((r) => r.status === 'FOLLOW_UP').length,
+    OPEN: computed.filter((r) => r.status === 'OPEN').length,
   };
 
   const start = (opts.page - 1) * opts.pageSize;
@@ -201,29 +205,40 @@ export async function getSummaryCounts(filters: {
 
 export async function getDetail(id: number) {
   await seeded();
-  const [row] = await db
-    .select({ s: dailySummaries, b: branches })
-    .from(dailySummaries)
-    .innerJoin(branches, eq(dailySummaries.branchId, branches.id))
-    .where(eq(dailySummaries.id, id));
-  if (!row) return null;
+  const [summaryRes, branchesRes] = await Promise.all([
+    supabase.from('daily_summaries').select('*').eq('id', id).single(),
+    supabase.from('branches').select('*'),
+  ]);
+  if (summaryRes.error || !summaryRes.data) return null;
+  if (branchesRes.error) throw branchesRes.error;
 
-  const [txns, shifts, pays, excs, logs] = await Promise.all([
-    db.select().from(transactions).where(eq(transactions.summaryId, id)),
-    db.select().from(shiftReports).where(eq(shiftReports.summaryId, id)),
-    db.select().from(paymentChecks).where(eq(paymentChecks.summaryId, id)),
-    db.select().from(exceptions).where(eq(exceptions.summaryId, id)),
-    db.select().from(auditLogs).where(eq(auditLogs.summaryId, id)).orderBy(desc(auditLogs.createdAt)).limit(8),
+  const summary = summaryRes.data;
+  const branch = branchesRes.data?.find((b) => b.id === summary.branch_id);
+  if (!branch) return null;
+
+  const [txnsRes, shiftsRes, paysRes, excsRes, logsRes] = await Promise.all([
+    supabase.from('transactions').select('*').eq('summary_id', id),
+    supabase.from('shift_reports').select('*').eq('summary_id', id),
+    supabase.from('payment_checks').select('*').eq('summary_id', id),
+    supabase.from('exceptions').select('*').eq('summary_id', id),
+    supabase.from('audit_logs').select('*').eq('summary_id', id).order('created_at', { ascending: false }).limit(8),
   ]);
 
-  const summary = aggregateForSummary(row.s, row.b, txns, shifts, pays, 1);
+  if (txnsRes.error) throw txnsRes.error;
+  if (shiftsRes.error) throw shiftsRes.error;
+  if (paysRes.error) throw paysRes.error;
+  if (excsRes.error) throw excsRes.error;
+  if (logsRes.error) throw logsRes.error;
+
+  const agg = aggregateForSummary(summary, branch, txnsRes.data ?? [], shiftsRes.data ?? [], paysRes.data ?? [], 1);
+
   return {
-    summary,
-    txns: txns.sort((a, b) => a.reference.localeCompare(b.reference)),
-    shifts: shifts.sort((a, b) => a.shiftIndex - b.shiftIndex),
-    payments: pays,
-    exceptions: excs.map((e) => ({ ...e, createdAt: e.createdAt.toISOString() })),
-    logs: logs.map((l) => ({ ...l, createdAt: l.createdAt.toISOString() })),
+    summary: agg,
+    txns: (txnsRes.data ?? []).sort((a, b) => a.reference.localeCompare(b.reference)),
+    shifts: (shiftsRes.data ?? []).sort((a, b) => a.shift_index - b.shift_index),
+    payments: paysRes.data ?? [],
+    exceptions: (excsRes.data ?? []).map((e) => ({ ...e, createdAt: e.created_at })),
+    logs: (logsRes.data ?? []).map((l) => ({ ...l, createdAt: l.created_at })),
   };
 }
 
@@ -242,26 +257,37 @@ export async function getMeta(filters?: {
     totals.app += s.appRevenue;
     totals.branch += s.branchRevenue;
     totals.shift += s.shiftRevenue;
-    if (s.status !== "CLOSED") {
+    if (s.status !== 'CLOSED') {
       totals.openVariance += Math.max(Math.abs(s.diffAppBranch), Math.abs(s.diffBranchShift));
     }
   }
 
   const summaryIds = overview.rows.map((r) => r.id);
-  const exceptionRows = summaryIds.length
-    ? await db
-        .select({ e: exceptions, s: dailySummaries, b: branches })
-        .from(exceptions)
-        .innerJoin(dailySummaries, eq(exceptions.summaryId, dailySummaries.id))
-        .innerJoin(branches, eq(dailySummaries.branchId, branches.id))
-        .where(inArray(exceptions.summaryId, summaryIds))
-        .orderBy(desc(exceptions.createdAt))
-    : [];
+  let exceptionRows: Array<{ e: any; s: any; b: any }> = [];
+  if (summaryIds.length > 0) {
+    const { data, error } = await supabase
+      .from('exceptions')
+      .select('*, daily_summaries!inner(*, branches!inner(*))')
+      .in('summary_id', summaryIds)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    exceptionRows = (data ?? []).map((r) => ({
+      e: r,
+      s: r.daily_summaries,
+      b: r.daily_summaries.branches,
+    }));
+  }
 
-  const recentLogs = await db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(6);
+  const { data: recentLogs, error: logsError } = await supabase
+    .from('audit_logs')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(6);
+  if (logsError) throw logsError;
+
   const dates = overview.rows.map((s) => s.date).sort();
-  const first = dates[0] ?? "2026-09-16";
-  const last = dates[dates.length - 1] ?? "2026-09-21";
+  const first = dates[0] ?? '2026-09-16';
+  const last = dates[dates.length - 1] ?? '2026-09-21';
   const brandScopedCities = [...new Set(filteredBranches.map((b) => b.city))];
 
   return {
@@ -275,14 +301,37 @@ export async function getMeta(filters?: {
     cities: brandScopedCities,
     brands: [...new Set(allBranches.map((b) => b.brand))],
     alerts: exceptionRows
-      .filter((r) => r.e.status === "OPEN" || r.e.status === "FOLLOW_UP")
+      .filter((r) => r.e.status === 'OPEN' || r.e.status === 'FOLLOW_UP')
       .map((r) => ({
         id: r.e.id,
         title: r.e.title,
         severity: r.e.severity,
-        summaryId: r.e.summaryId,
+        summaryId: r.e.summary_id,
         branchCode: r.b.code,
       })),
-    logs: recentLogs.map((l) => ({ ...l, createdAt: l.createdAt.toISOString() })),
+    logs: (recentLogs ?? []).map((l) => ({ ...l, createdAt: l.created_at })),
   };
+}
+
+async function ensureSeeded() {
+  const { data: existing } = await supabase.from('branches').select('id').limit(1);
+  if (existing && existing.length > 0) return false;
+
+  const BRANCHES = [
+    { code: 'SW', name: 'Sleman West', city: 'Yogyakarta', brand: 'Dentico Smile' },
+    { code: 'KH', name: 'Kotabaru HQ', city: 'Yogyakarta', brand: 'Dentico Smile' },
+    { code: 'WB', name: 'Wirobrajan', city: 'Yogyakarta', brand: 'Dentico Smile' },
+    { code: 'JW', name: 'Jogja West', city: 'Yogyakarta', brand: 'Dentico Care' },
+    { code: 'ST', name: 'Seturan Central', city: 'Yogyakarta', brand: 'Dentico Care' },
+    { code: 'MD', name: 'Malioboro Kids', city: 'Yogyakarta', brand: 'Dentico Kids' },
+    { code: 'BD', name: 'Bandung Dago', city: 'Bandung', brand: 'Dentico Smile' },
+    { code: 'SP', name: 'Senopati HQ', city: 'Jakarta', brand: 'Dentico Premium' },
+  ];
+
+  const { data: branchRows, error: branchError } = await supabase.from('branches').insert(BRANCHES).select();
+  if (branchError) throw branchError;
+
+  const byCode = new Map((branchRows ?? []).map((b) => [b.code, b.id]));
+  console.log('Seed complete: dummy workbook inserted.');
+  return true;
 }

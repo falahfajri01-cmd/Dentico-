@@ -1,11 +1,10 @@
-import { db } from "@/db";
-import { sql } from "drizzle-orm";
+import { supabase } from '@/lib/supabase';
 
-export const dynamic = "force-dynamic";
+export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
-    await db.execute(sql`select 1`);
+    await supabase.from('branches').select('id').limit(1);
     return Response.json({ ok: true });
   } catch {
     return Response.json({ ok: false }, { status: 500 });
